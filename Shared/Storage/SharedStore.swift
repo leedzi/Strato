@@ -2,7 +2,6 @@ import Foundation
 import WidgetKit
 
 /// Shared persistence between Strato app and StratoWidget.
-/// Falls back gracefully to `.standard` if App Group entitlements are absent during free sideloading.
 public final class SharedStore: @unchecked Sendable {
     public static let shared = SharedStore()
     public static let appGroupID = "group.com.strato.focus"
@@ -14,7 +13,7 @@ public final class SharedStore: @unchecked Sendable {
     private enum Keys {
         static let activeFlight = "strato.activeFlightSnapshot"
         static let logbook = "strato.flightLogbook"
-        static let preferredRegion = "strato.preferredRegion"
+        static let preferredScope = "strato.preferredScope.v2"
         static let mapStyleRaw = "strato.mapStyle"
         static let adsbLolApiKey = "strato.adsbLolApiKey"
     }
@@ -53,16 +52,16 @@ public final class SharedStore: @unchecked Sendable {
         return (try? decoder.decode([FocusSessionRecord].self, from: data)) ?? []
     }
 
-    public var preferredRegion: RadarRegion {
+    public var preferredScope: RadarScope {
         get {
-            guard let raw = defaults.string(forKey: Keys.preferredRegion),
-                  let region = RadarRegion(rawValue: raw) else {
-                return .eastAsia
+            guard let raw = defaults.string(forKey: Keys.preferredScope),
+                  let scope = RadarScope(rawValue: raw) else {
+                return .globalLive
             }
-            return region
+            return scope
         }
         set {
-            defaults.set(newValue.rawValue, forKey: Keys.preferredRegion)
+            defaults.set(newValue.rawValue, forKey: Keys.preferredScope)
         }
     }
 

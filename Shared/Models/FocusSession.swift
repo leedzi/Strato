@@ -15,10 +15,15 @@ public struct FocusSessionRecord: Identifiable, Codable, Hashable, Sendable {
     public let destinationLon: Double
     public let focusTag: FocusTag
     public let seatNumber: String
+    public let gateNumber: String
+    public let cabinClass: String
+    public let sequenceNumber: String
     public let startedAt: Date
     public let completedAt: Date
     public let durationMinutes: Int
     public let distanceKM: Int
+    public let boardedAtProgress: Double
+    public let landedAtProgress: Double
     public let wasLiveTracked: Bool
     public let completed: Bool
 
@@ -37,10 +42,15 @@ public struct FocusSessionRecord: Identifiable, Codable, Hashable, Sendable {
         destinationLon: Double,
         focusTag: FocusTag,
         seatNumber: String,
+        gateNumber: String = "G18",
+        cabinClass: String = "BUSINESS",
+        sequenceNumber: String = "SEQ 024",
         startedAt: Date,
         completedAt: Date,
         durationMinutes: Int,
         distanceKM: Int,
+        boardedAtProgress: Double = 0.35,
+        landedAtProgress: Double = 1.0,
         wasLiveTracked: Bool,
         completed: Bool
     ) {
@@ -58,10 +68,15 @@ public struct FocusSessionRecord: Identifiable, Codable, Hashable, Sendable {
         self.destinationLon = destinationLon
         self.focusTag = focusTag
         self.seatNumber = seatNumber
+        self.gateNumber = gateNumber
+        self.cabinClass = cabinClass
+        self.sequenceNumber = sequenceNumber
         self.startedAt = startedAt
         self.completedAt = completedAt
         self.durationMinutes = durationMinutes
         self.distanceKM = distanceKM
+        self.boardedAtProgress = boardedAtProgress
+        self.landedAtProgress = landedAtProgress
         self.wasLiveTracked = wasLiveTracked
         self.completed = completed
     }

@@ -6,17 +6,22 @@ struct RootView: View {
 
     enum AppTab: Hashable {
         case radar
+        case analytics
         case logbook
         case settings
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            Tab("雷达", systemImage: "airplane.circle.fill", value: AppTab.radar) {
+            Tab("实时雷达", systemImage: "airplane.circle.fill", value: AppTab.radar) {
                 RadarFocusView()
             }
 
-            Tab("飞行日志", systemImage: "book.pages.fill", value: AppTab.logbook) {
+            Tab("专注分析", systemImage: "chart.bar.xaxis", value: AppTab.analytics) {
+                AnalyticsView()
+            }
+
+            Tab("飞行护照", systemImage: "ticket.fill", value: AppTab.logbook) {
                 LogbookView()
             }
 
@@ -36,7 +41,7 @@ struct RootView: View {
             set: { store.recentlyCompletedRecord = $0 }
         )) { record in
             LandingStampSheet(record: record)
-                .presentationDetents([.medium])
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
     }
@@ -47,52 +52,50 @@ private struct LandingStampSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 52))
-                .foregroundStyle(StratoTheme.radarEmerald)
-                .symbolEffect(.bounce)
+        ScrollView {
+            VStack(spacing: 18) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.title2)
+                        .foregroundStyle(StratoTheme.radarEmerald)
+                    Text("已安全降落 · 登机牌已盖入境章")
+                        .font(.title3.bold())
+                }
+                .padding(.top, 8)
 
-            VStack(spacing: 6) {
-                Text("已安全降落")
-                    .font(.title2.bold())
-                Text("\(record.callsign) · \(record.originIATA) → \(record.destinationIATA)")
-                    .font(.headline.monospaced())
-                    .foregroundStyle(.secondary)
+                AirlineBoardingPassCard(
+                    callsign: record.callsign,
+                    airlineName: record.airlineName,
+                    aircraftType: record.aircraftType,
+                    originIATA: record.originIATA,
+                    originCity: record.originCity,
+                    destinationIATA: record.destinationIATA,
+                    destinationCity: record.destinationCity,
+                    seatNumber: record.seatNumber,
+                    gateNumber: record.gateNumber,
+                    cabinClass: record.cabinClass,
+                    sequenceNumber: record.sequenceNumber,
+                    flightLevelText: "ARRIVED",
+                    durationMinutes: record.durationMinutes,
+                    distanceKM: record.distanceKM,
+                    realProgress: 1.0,
+                    focusTag: record.focusTag,
+                    date: record.completedAt,
+                    showArrivedStamp: true
+                )
+
+                Button {
+                    dismiss()
+                } label: {
+                    Text("收入飞行护照与专注统计")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.glassProminent)
+                .tint(StratoTheme.skyCyan)
             }
-
-            HStack(spacing: 20) {
-                statBlock(title: "专注时长", value: "\(record.durationMinutes) 分钟")
-                Divider().frame(height: 36)
-                statBlock(title: "飞行里程", value: "\(record.distanceKM) km")
-                Divider().frame(height: 36)
-                statBlock(title: "座位", value: record.seatNumber)
-            }
-            .padding(.vertical, 14)
-            .padding(.horizontal, 20)
-            .stratoGlassCard(cornerRadius: 20)
-
-            Button {
-                dismiss()
-            } label: {
-                Text("收入飞行护照")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.glassProminent)
-            .tint(StratoTheme.skyCyan)
-        }
-        .padding(24)
-    }
-
-    private func statBlock(title: String, value: String) -> some View {
-        VStack(spacing: 4) {
-            Text(value)
-                .font(.headline.monospacedDigit())
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .padding(20)
         }
     }
 }

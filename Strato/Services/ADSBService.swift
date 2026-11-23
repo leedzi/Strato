@@ -1,80 +1,174 @@
 import Foundation
 import CoreLocation
 
-/// Real-time ADS-B radar & route enrichment client.
-/// Uses free community ADS-B feeds (adsb.fi + adsb.lol) with zero required API keys.
+/// High-concurrency Global ADS-B Radar & Schedule Route Resolver.
+/// - Scans 12 global aviation corridors in parallel via `opendata.adsb.fi` (and `api.adsb.lol` backup).
+/// - Resolves real origin & destination airports via `api.adsbdb.com/v0/callsign/{CALLSIGN}` with an in-memory cache.
+/// - Geometrically infers realistic origin & destination airports along the aircraft's heading cone if unlisted.
 actor ADSBService {
     static let shared = ADSBService()
 
     private let session: URLSession
-    private let userAgent = "Strato/1.0 (iOS Liquid Glass Focus Flight Tracker)"
+    private let userAgent = "Strato/2.0 (iOS 26 Liquid Glass Focus Flight Tracker)"
+
+    private struct CachedRoute: Sendable {
+        let iataFlight: String
+        let airlineName: String
+        let origin: Airport
+        let destination: Airport
+        let isVerified: Bool
+    }
+
+    private var routeCache: [String: CachedRoute] = [:]
 
     init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 18
+        config.timeoutIntervalForRequest = 9
+        config.timeoutIntervalForResource = 16
+        config.httpMaximumConnectionsPerHost = 12
         self.session = URLSession(configuration: config)
     }
 
-    // MARK: - Public API
+    // MARK: - Global / Multi-Hub Radar Scan
 
-    /// Fetches live airborne commercial flights around a coordinate (radius in nautical miles, max 250).
-    func fetchNearbyFlights(
-        center: CLLocationCoordinate2D,
-        radiusNM: Int = 220,
-        limit: Int = 36
+    /// Scans all hubs for the given `RadarScope` (default `.globalLive` scans 12 global hubs in parallel)
+    /// and returns up to `maxResults` real airborne flights with resolved origin & destination airports.
+    func scanGlobalOrScopedAirspace(
+        scope: RadarScope,
+        customCenter: CLLocationCoordinate2D? = nil,
+        maxResults: Int = 90
     ) async -> [LiveFlight] {
-        let clampedRadius = min(max(radiusNM, 25), 250)
-        var rawAircraft: [ADSBV2Aircraft] = []
-
-        // Primary: opendata.adsb.fi (free, no key)
-        if let fiPlanes = await fetchFromAdsbFi(center: center, radiusNM: clampedRadius), !fiPlanes.isEmpty {
-            rawAircraft = fiPlanes
-        } else if let lolPlanes = await fetchFromAdsbLol(center: center, radiusNM: clampedRadius), !lolPlanes.isEmpty {
-            rawAircraft = lolPlanes
+        let hubs: [CLLocationCoordinate2D]
+        if let customCenter {
+            hubs = [customCenter]
+        } else {
+            hubs = scope.scanHubs
         }
 
-        // Filter airborne aircraft with valid coordinates and callsigns
-        let airborne = rawAircraft.filter { ac in
-            guard let lat = ac.lat, let lon = ac.lon,
-                  let callsign = ac.cleanCallsign, callsign.count >= 4,
-                  let alt = ac.altitudeFeet, alt >= 2500,
-                  let gs = ac.gs, gs >= 140 else {
+        var rawPool: [ADSBV2Aircraft] = []
+        await withTaskGroup(of: [ADSBV2Aircraft].self) { group in
+            for hub in hubs {
+                group.addTask {
+                    await self.fetchRawAircraftAtPoint(center: hub, radiusNM: 250)
+                }
+            }
+            for await batch in group {
+                rawPool.append(contentsOf: batch)
+            }
+        }
+
+        // Deduplicate by ICAO24 hex and filter airborne commercial jets
+        var seenHex = Set<String>()
+        let airborne = rawPool.filter { ac in
+            guard seenHex.insert(ac.hex).inserted,
+                  let lat = ac.lat, let lon = ac.lon,
+                  let cs = ac.cleanCallsign, cs.count >= 4,
+                  let alt = ac.altitudeFeet, alt >= 3_500,
+                  let gs = ac.gs, gs >= 165 else {
                 return false
             }
             return abs(lat) <= 85 && abs(lon) <= 180
         }
 
-        let selected = Array(airborne.prefix(limit))
-        guard !selected.isEmpty else { return [] }
-
-        // Batch-enrich origin & destination airports via adsb.lol routeset
-        let routeMap = await fetchRoutes(for: selected)
-
-        return selected.compactMap { ac -> LiveFlight? in
-            guard let lat = ac.lat, let lon = ac.lon, let callsign = ac.cleanCallsign else { return nil }
-            let route = routeMap[callsign]
-            return LiveFlight(
-                id: ac.hex,
-                callsign: callsign,
-                registration: ac.r ?? "",
-                aircraftType: ac.t ?? "A320",
-                airlineName: AirlineLookup.name(forCallsign: callsign),
-                origin: route?.origin,
-                destination: route?.destination,
-                latitude: lat,
-                longitude: lon,
-                altitudeFeet: ac.altitudeFeet ?? 32_000,
-                groundSpeedKnots: ac.gs ?? 440,
-                trackDegrees: ac.track ?? 90,
-                verticalRateFpm: ac.baro_rate ?? 0,
-                isLiveADSB: true,
-                updatedAt: Date()
-            )
+        // Prioritize recognized airline prefixes first so the user sees major carriers with rich liveries
+        let sortedAirborne = airborne.sorted { lhs, rhs in
+            let lKnown = AirlineThemeRegistry.branding(forCallsign: lhs.cleanCallsign ?? "").icaoPrefix != "STR"
+            let rKnown = AirlineThemeRegistry.branding(forCallsign: rhs.cleanCallsign ?? "").icaoPrefix != "STR"
+            if lKnown != rKnown { return lKnown }
+            return (lhs.altitudeFeet ?? 0) > (rhs.altitudeFeet ?? 0)
         }
+
+        let candidates = Array(sortedAirborne.prefix(maxResults))
+        guard !candidates.isEmpty else { return [] }
+
+        // Resolve routes concurrently via adsbdb + geometric fallback
+        return await enrichAircraftWithRoutes(candidates)
     }
 
-    /// Refreshes a single live aircraft by ICAO24 hex code during an active focus session.
+    /// Recommends live airborne flights whose real-time remaining duration matches `targetMinutes`.
+    func recommendFlights(
+        targetMinutes: Int,
+        preferredDestination: Airport?,
+        scope: RadarScope,
+        existingPool: [LiveFlight] = []
+    ) async -> [LiveFlight] {
+        var pool: [LiveFlight] = existingPool
+
+        if let dest = preferredDestination {
+            // Scan around the target destination airport AND along major approach corridors (800-2000km out)
+            let ringCenters = [
+                dest.coordinate,
+                GreatCircle.destination(from: dest.coordinate, bearingDegrees: 45, distanceNM: 380),
+                GreatCircle.destination(from: dest.coordinate, bearingDegrees: 135, distanceNM: 380),
+                GreatCircle.destination(from: dest.coordinate, bearingDegrees: 225, distanceNM: 380),
+                GreatCircle.destination(from: dest.coordinate, bearingDegrees: 315, distanceNM: 380)
+            ]
+            var rawRing: [ADSBV2Aircraft] = []
+            await withTaskGroup(of: [ADSBV2Aircraft].self) { group in
+                for pt in ringCenters {
+                    group.addTask {
+                        await self.fetchRawAircraftAtPoint(center: pt, radiusNM: 250)
+                    }
+                }
+                for await batch in group {
+                    rawRing.append(contentsOf: batch)
+                }
+            }
+            var seen = Set<String>()
+            let filtered = rawRing.filter { ac in
+                guard seen.insert(ac.hex).inserted,
+                      let cs = ac.cleanCallsign, cs.count >= 4,
+                      let alt = ac.altitudeFeet, alt >= 2500,
+                      let gs = ac.gs, gs >= 150 else { return false }
+                return true
+            }
+            let enriched = await enrichAircraftWithRoutes(Array(filtered.prefix(65)))
+            pool.append(contentsOf: enriched)
+        } else if pool.count < 25 {
+            pool = await scanGlobalOrScopedAirspace(scope: scope, maxResults: 90)
+        }
+
+        // Deduplicate pool
+        var seenIDs = Set<String>()
+        let uniquePool = pool.filter { seenIDs.insert($0.id).inserted }
+
+        let filteredPool: [LiveFlight]
+        if let preferredDestination {
+            let exactMatches = uniquePool.filter { $0.destination?.iata == preferredDestination.iata }
+            if !exactMatches.isEmpty {
+                filteredPool = exactMatches
+            } else {
+                // Also include aircraft heading toward that airport
+                filteredPool = uniquePool.filter { flight in
+                    let dist = GreatCircle.distanceKM(from: flight.coordinate, to: preferredDestination.coordinate)
+                    let bearing = GreatCircle.bearingDegrees(from: flight.coordinate, to: preferredDestination.coordinate)
+                    return dist < 2400 && GreatCircle.angleDifference(flight.trackDegrees, bearing) < 38
+                }.map { flight in
+                    var adjusted = flight
+                    adjusted.destination = preferredDestination
+                    return adjusted
+                }
+            }
+        } else {
+            filteredPool = uniquePool
+        }
+
+        let ranked = (filteredPool.isEmpty ? uniquePool : filteredPool).sorted { lhs, rhs in
+            let lDiff = abs(lhs.estimatedRemainingMinutes - targetMinutes)
+            let rDiff = abs(rhs.estimatedRemainingMinutes - targetMinutes)
+            if abs(lDiff - rDiff) > 4 {
+                return lDiff < rDiff
+            }
+            if lhs.isRouteVerified != rhs.isRouteVerified {
+                return lhs.isRouteVerified
+            }
+            return lDiff < rDiff
+        }
+
+        return ranked
+    }
+
+    /// Polls a single live aircraft by ICAO24 hex code during an active focus session.
     func refreshFlight(hex: String, existing: LiveFlight) async -> LiveFlight? {
         let urls = [
             URL(string: "https://opendata.adsb.fi/api/v2/hex/\(hex)"),
@@ -102,8 +196,13 @@ actor ADSBService {
                 updated.longitude = lon
                 updated.altitudeFeet = ac.altitudeFeet ?? existing.altitudeFeet
                 updated.groundSpeedKnots = ac.gs ?? existing.groundSpeedKnots
+                updated.indicatedAirspeedKnots = ac.ias ?? existing.indicatedAirspeedKnots
+                updated.trueAirspeedKnots = ac.tas ?? existing.trueAirspeedKnots
+                updated.mach = ac.mach ?? existing.mach
                 updated.trackDegrees = ac.track ?? existing.trackDegrees
+                updated.rollDegrees = ac.roll ?? existing.rollDegrees
                 updated.verticalRateFpm = ac.baro_rate ?? existing.verticalRateFpm
+                updated.squawk = ac.squawk ?? existing.squawk
                 updated.updatedAt = Date()
                 return updated
             }
@@ -111,233 +210,226 @@ actor ADSBService {
         return nil
     }
 
-    /// Scans live airspace to recommend real flights whose remaining time to landing matches `targetMinutes`.
-    func recommendFlights(
-        targetMinutes: Int,
-        preferredDestination: Airport?,
-        region: RadarRegion
-    ) async -> [LiveFlight] {
-        var collected: [LiveFlight] = []
-
-        if let dest = preferredDestination {
-            // Scan around the desired destination airport (and slightly wider hubs)
-            let nearby = await fetchNearbyFlights(center: dest.coordinate, radiusNM: 250, limit: 45)
-            collected.append(contentsOf: nearby)
-        } else {
-            // Scan 2 primary hubs in the selected radar region in parallel
-            let hubs = Array(region.scanCenters.prefix(2))
-            await withTaskGroup(of: [LiveFlight].self) { group in
-                for hub in hubs {
-                    group.addTask {
-                        await self.fetchNearbyFlights(center: hub, radiusNM: 240, limit: 28)
-                    }
-                }
-                for await batch in group {
-                    collected.append(contentsOf: batch)
-                }
-            }
-        }
-
-        // Deduplicate by ICAO hex
-        var seen = Set<String>()
-        let unique = collected.filter { seen.insert($0.id).inserted }
-
-        // Prefer flights with known destination; optionally filter by user's target destination
-        let withRoutes = unique.filter { flight in
-            guard let dest = flight.destination else { return false }
-            if let preferredDestination {
-                return dest.iata == preferredDestination.iata
-            }
-            return true
-        }
-
-        // Rank by how closely real-time ETA matches the user's requested focus duration
-        let ranked = withRoutes.sorted { lhs, rhs in
-            abs(lhs.estimatedRemainingMinutes - targetMinutes)
-            < abs(rhs.estimatedRemainingMinutes - targetMinutes)
-        }
-
-        if !ranked.isEmpty {
-            return Array(ranked.prefix(12))
-        }
-
-        // If live ADS-B has no exact destination matches (e.g. offline or sparse coverage),
-        // synthesize realistic flights calibrated to the user's exact duration & destination.
-        return generateCalibratedFallbackFlights(
-            targetMinutes: targetMinutes,
-            preferredDestination: preferredDestination,
-            region: region
-        )
-    }
-
-    /// Creates a custom focus flight between any two chosen airports, calibrated to `durationMinutes`.
+    /// Creates a custom charter flight between any two chosen airports, positioned at a realistic mid-flight point
+    /// so its remaining flight time matches `durationMinutes`.
     nonisolated func makeCustomFlight(
         origin: Airport,
         destination: Airport,
+        airlineCode: String = "CCA",
         durationMinutes: Int
     ) -> LiveFlight {
-        let totalNM = max(GreatCircle.distanceNM(from: origin.coordinate, to: destination.coordinate), 80)
-        let speedKnots = min(max(totalNM / max(Double(durationMinutes) / 60.0, 0.25), 320), 520)
-        let startCoord = GreatCircle.interpolate(from: origin.coordinate, to: destination.coordinate, fraction: 0.04)
-        let heading = GreatCircle.bearingDegrees(from: startCoord, to: destination.coordinate)
-        let flightNum = Int.random(in: 101...988)
+        let branding = AirlineThemeRegistry.branding(forCallsign: airlineCode)
+        let totalNM = max(GreatCircle.distanceNM(from: origin.coordinate, to: destination.coordinate), 100)
+        let cruiseKnots = 455.0
+        let remainingNM = min(totalNM * 0.92, max(60, Double(durationMinutes) / 60.0 * cruiseKnots))
+        let currentProgress = min(max(1.0 - (remainingNM / totalNM), 0.08), 0.88)
+        let currentCoord = GreatCircle.interpolate(from: origin.coordinate, to: destination.coordinate, fraction: currentProgress)
+        let heading = GreatCircle.bearingDegrees(from: currentCoord, to: destination.coordinate)
+        let num = Int.random(in: 108...986)
 
         return LiveFlight(
-            id: "STRATO-\(UUID().uuidString.prefix(8))",
-            callsign: "STR\(flightNum)",
-            registration: "B-\(Int.random(in: 1000...9999))",
-            aircraftType: totalNM > 1800 ? "A359" : "A321",
-            airlineName: "Strato Airways",
+            id: "CHARTER-\(UUID().uuidString.prefix(8))",
+            callsign: "\(branding.icaoPrefix)\(num)",
+            iataFlightNumber: "\(branding.iataCode)\(num)",
+            registration: "B-\(Int.random(in: 2000...9999))",
+            aircraftType: totalNM > 1600 ? "A359" : "A321",
+            aircraftDescription: totalNM > 1600 ? "AIRBUS A350-900" : "AIRBUS A321neo",
+            airlineName: branding.nameCN,
             origin: origin,
             destination: destination,
-            latitude: startCoord.latitude,
-            longitude: startCoord.longitude,
-            altitudeFeet: totalNM > 1200 ? 37_000 : 31_000,
-            groundSpeedKnots: speedKnots,
+            isRouteVerified: true,
+            latitude: currentCoord.latitude,
+            longitude: currentCoord.longitude,
+            altitudeFeet: totalNM > 1200 ? 37_000 : 33_000,
+            groundSpeedKnots: cruiseKnots,
+            indicatedAirspeedKnots: 275,
+            trueAirspeedKnots: 462,
+            mach: 0.84,
             trackDegrees: heading,
+            rollDegrees: 0.0,
             verticalRateFpm: 0,
+            squawk: "2341",
             isLiveADSB: false,
             updatedAt: Date()
         )
     }
 
-    // MARK: - Private Network Helpers
+    // MARK: - Route Enrichment Engine (adsbdb + geometric inference)
 
-    private func fetchFromAdsbFi(center: CLLocationCoordinate2D, radiusNM: Int) async -> [ADSBV2Aircraft]? {
-        let urlString = String(
-            format: "https://opendata.adsb.fi/api/v3/lat/%.4f/lon/%.4f/dist/%d",
-            center.latitude, center.longitude, radiusNM
-        )
-        guard let url = URL(string: urlString) else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+    private func enrichAircraftWithRoutes(_ aircraftList: [ADSBV2Aircraft]) async -> [LiveFlight] {
+        // Resolve up to 36 uncached callsigns against api.adsbdb.com in parallel
+        let uncachedCallsigns = aircraftList
+            .compactMap(\.cleanCallsign)
+            .filter { routeCache[$0] == nil }
+            .prefix(36)
 
-        guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode),
-              let decoded = try? JSONDecoder().decode(ADSBV2Response.self, from: data) else {
-            return nil
-        }
-        return decoded.aircraftList
-    }
-
-    private func fetchFromAdsbLol(center: CLLocationCoordinate2D, radiusNM: Int) async -> [ADSBV2Aircraft]? {
-        let urlString = String(
-            format: "https://api.adsb.lol/v2/point/%.4f/%.4f/%d",
-            center.latitude, center.longitude, radiusNM
-        )
-        guard let url = URL(string: urlString) else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        let key = SharedStore.shared.adsbLolApiKey
-        if !key.isEmpty {
-            request.setValue(key, forHTTPHeaderField: "X-API-Key")
-        }
-
-        guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode),
-              let decoded = try? JSONDecoder().decode(ADSBV2Response.self, from: data) else {
-            return nil
-        }
-        return decoded.aircraftList
-    }
-
-    private func fetchRoutes(for aircraft: [ADSBV2Aircraft]) async -> [String: (origin: Airport?, destination: Airport?)] {
-        guard let url = URL(string: "https://api.adsb.lol/api/0/routeset") else { return [:] }
-        let planesPayload: [[String: Any]] = aircraft.compactMap { ac in
-            guard let callsign = ac.cleanCallsign, let lat = ac.lat, let lon = ac.lon else { return nil }
-            return ["callsign": callsign, "lat": lat, "lng": lon]
-        }
-        guard !planesPayload.isEmpty,
-              let body = try? JSONSerialization.data(withJSONObject: ["planes": planesPayload]) else {
-            return [:]
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-
-        guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode),
-              let entries = try? JSONDecoder().decode([RoutesetEntry].self, from: data) else {
-            return [:]
-        }
-
-        var result: [String: (origin: Airport?, destination: Airport?)] = [:]
-        for entry in entries {
-            guard let callsign = entry.callsign?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  let airportCodes = entry.airportCodes,
-                  !airportCodes.isEmpty else { continue }
-            let parts = airportCodes.split(separator: "-").map(String.init)
-            if parts.count >= 2 {
-                let origin = AirportDatabase.find(code: parts.first ?? "")
-                let dest = AirportDatabase.find(code: parts.last ?? "")
-                if origin != nil || dest != nil {
-                    result[callsign] = (origin, dest)
+        await withTaskGroup(of: (String, CachedRoute?).self) { group in
+            for callsign in uncachedCallsigns {
+                group.addTask {
+                    let resolved = await self.lookupRouteFromAdsbDB(callsign: callsign)
+                    return (callsign, resolved)
+                }
+            }
+            for await (cs, route) in group {
+                if let route {
+                    routeCache[cs] = route
                 }
             }
         }
-        return result
-    }
 
-    // MARK: - Calibrated Fallback Flights
+        return aircraftList.compactMap { ac -> LiveFlight? in
+            guard let lat = ac.lat, let lon = ac.lon, let callsign = ac.cleanCallsign else { return nil }
+            let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            let alt = ac.altitudeFeet ?? 33_000
+            let track = ac.track ?? 90.0
+            let vRate = ac.baro_rate ?? 0
+            let branding = AirlineThemeRegistry.branding(forCallsign: callsign)
 
-    private func generateCalibratedFallbackFlights(
-        targetMinutes: Int,
-        preferredDestination: Airport?,
-        region: RadarRegion
-    ) -> [LiveFlight] {
-        let pairs: [(String, String, String, String, String)] = [
-            ("PVG", "HND", "ANA920", "A359", "全日空"),
-            ("PEK", "ICN", "CCA123", "B789", "中国国际航空"),
-            ("HKG", "TPE", "CPA494", "A333", "国泰航空"),
-            ("SZX", "SIN", "SIA857", "A359", "新加坡航空"),
-            ("CTU", "PVG", "CES5402", "A321", "中国东方航空"),
-            ("LHR", "ZRH", "BAW714", "A320", "英国航空"),
-            ("CDG", "FRA", "DLH1031", "A20N", "汉莎航空"),
-            ("SFO", "SEA", "ASA1092", "B739", "阿拉斯加航空"),
-            ("JFK", "ORD", "DAL482", "A223", "达美航空")
-        ]
+            let origin: Airport
+            let destination: Airport
+            let iataFlight: String
+            let airlineName: String
+            let isVerified: Bool
 
-        var flights: [LiveFlight] = []
-        let targetNM = max(Double(targetMinutes) / 60.0 * 440.0, 140)
-
-        for (index, item) in pairs.enumerated() {
-            guard let orig = AirportDatabase.find(code: item.0),
-                  let rawDest = AirportDatabase.find(code: item.1) else { continue }
-            let dest = preferredDestination ?? rawDest
-            guard orig.iata != dest.iata else { continue }
-
-            let totalNM = max(GreatCircle.distanceNM(from: orig.coordinate, to: dest.coordinate), 220)
-            let frac = min(max(1.0 - (targetNM / totalNM), 0.12), 0.82)
-            let pos = GreatCircle.interpolate(from: orig.coordinate, to: dest.coordinate, fraction: frac)
-            let bearing = GreatCircle.bearingDegrees(from: pos, to: dest.coordinate)
-
-            flights.append(
-                LiveFlight(
-                    id: "SIM-\(index)-\(item.2)",
-                    callsign: item.2,
-                    registration: "B-30\(10 + index)A",
-                    aircraftType: item.3,
-                    airlineName: item.4,
-                    origin: orig,
-                    destination: dest,
-                    latitude: pos.latitude,
-                    longitude: pos.longitude,
-                    altitudeFeet: 34_000 + (index % 4) * 1_000,
-                    groundSpeedKnots: 445 + Double(index % 3) * 15,
-                    trackDegrees: bearing,
-                    verticalRateFpm: 0,
-                    isLiveADSB: false,
-                    updatedAt: Date()
+            if let cached = routeCache[callsign] {
+                origin = cached.origin
+                destination = cached.destination
+                iataFlight = cached.iataFlight
+                airlineName = branding.icaoPrefix != "STR" ? branding.nameCN : cached.airlineName
+                isVerified = cached.isVerified
+            } else {
+                let inferred = AirportDatabase.inferRoute(
+                    coordinate: coord,
+                    trackDegrees: track,
+                    altitudeFeet: alt,
+                    verticalRateFpm: vRate
                 )
+                origin = inferred.origin
+                destination = inferred.destination
+                iataFlight = ""
+                airlineName = branding.nameCN
+                isVerified = false
+            }
+
+            return LiveFlight(
+                id: ac.hex,
+                callsign: callsign,
+                iataFlightNumber: iataFlight,
+                registration: ac.r ?? "",
+                aircraftType: ac.t ?? "A320",
+                aircraftDescription: ac.desc ?? (ac.t ?? "COMMERCIAL JET"),
+                airlineName: airlineName,
+                origin: origin,
+                destination: destination,
+                isRouteVerified: isVerified,
+                latitude: lat,
+                longitude: lon,
+                altitudeFeet: alt,
+                groundSpeedKnots: ac.gs ?? 445,
+                indicatedAirspeedKnots: ac.ias,
+                trueAirspeedKnots: ac.tas,
+                mach: ac.mach,
+                trackDegrees: track,
+                rollDegrees: ac.roll,
+                verticalRateFpm: vRate,
+                squawk: ac.squawk,
+                isLiveADSB: true,
+                updatedAt: Date()
             )
         }
-        return flights
+    }
+
+    private func lookupRouteFromAdsbDB(callsign: String) async -> CachedRoute? {
+        guard let url = URL(string: "https://api.adsbdb.com/v0/callsign/\(callsign)") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 4.5
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let decoded = try? JSONDecoder().decode(ADSBDBCallsignResponse.self, from: data),
+              let route = decoded.response.flightroute,
+              let orig = route.origin,
+              let dest = route.destination,
+              let origIATA = orig.iata_code, !origIATA.isEmpty,
+              let destIATA = dest.iata_code, !destIATA.isEmpty else {
+            return nil
+        }
+
+        // Use local Chinese city name if in AirportDatabase, otherwise use dynamic coordinates from adsbdb
+        let originAirport = AirportDatabase.find(code: origIATA) ?? Airport(
+            iata: origIATA,
+            icao: orig.icao_code ?? origIATA,
+            name: orig.name ?? origIATA,
+            city: orig.municipality ?? origIATA,
+            country: orig.country_iso_name ?? "",
+            latitude: orig.latitude ?? 0,
+            longitude: orig.longitude ?? 0
+        )
+
+        let destAirport = AirportDatabase.find(code: destIATA) ?? Airport(
+            iata: destIATA,
+            icao: dest.icao_code ?? destIATA,
+            name: dest.name ?? destIATA,
+            city: dest.municipality ?? destIATA,
+            country: dest.country_iso_name ?? "",
+            latitude: dest.latitude ?? 0,
+            longitude: dest.longitude ?? 0
+        )
+
+        guard abs(originAirport.latitude) > 0.01 && abs(destAirport.latitude) > 0.01 else {
+            return nil
+        }
+
+        return CachedRoute(
+            iataFlight: route.callsign_iata ?? "",
+            airlineName: route.airline?.name ?? "商业航班",
+            origin: originAirport,
+            destination: destAirport,
+            isVerified: true
+        )
+    }
+
+    // MARK: - Raw Point Fetch
+
+    private func fetchRawAircraftAtPoint(center: CLLocationCoordinate2D, radiusNM: Int) async -> [ADSBV2Aircraft] {
+        let clamped = min(max(radiusNM, 25), 250)
+        let fiURL = URL(string: String(
+            format: "https://opendata.adsb.fi/api/v3/lat/%.4f/lon/%.4f/dist/%d",
+            center.latitude, center.longitude, clamped
+        ))
+        if let fiURL, let list = await fetchADSBJSON(url: fiURL), !list.isEmpty {
+            return list
+        }
+
+        let lolURL = URL(string: String(
+            format: "https://api.adsb.lol/v2/point/%.4f/%.4f/%d",
+            center.latitude, center.longitude, clamped
+        ))
+        if let lolURL, let list = await fetchADSBJSON(url: lolURL), !list.isEmpty {
+            return list
+        }
+        return []
+    }
+
+    private func fetchADSBJSON(url: URL) async -> [ADSBV2Aircraft]? {
+        var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if url.host?.contains("adsb.lol") == true {
+            let key = SharedStore.shared.adsbLolApiKey
+            if !key.isEmpty {
+                request.setValue(key, forHTTPHeaderField: "X-API-Key")
+            }
+        }
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let decoded = try? JSONDecoder().decode(ADSBV2Response.self, from: data) else {
+            return nil
+        }
+        return decoded.aircraftList
     }
 }
 
@@ -357,11 +449,17 @@ private struct ADSBV2Aircraft: Decodable {
     let flight: String?
     let r: String?
     let t: String?
+    let desc: String?
     let lat: Double?
     let lon: Double?
     let gs: Double?
+    let ias: Int?
+    let tas: Int?
+    let mach: Double?
     let track: Double?
+    let roll: Double?
     let baro_rate: Int?
+    let squawk: String?
     let alt_baro: AltBaroValue?
 
     var cleanCallsign: String? {
@@ -398,49 +496,35 @@ private enum AltBaroValue: Decodable {
     }
 }
 
-private struct RoutesetEntry: Decodable {
-    let callsign: String?
-    let airportCodes: String?
-
-    enum CodingKeys: String, CodingKey {
-        case callsign
-        case airportCodes = "_airport_codes_iata"
+private struct ADSBDBCallsignResponse: Decodable {
+    struct Inner: Decodable {
+        let flightroute: FlightRoute?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            // adsbdb returns "unknown callsign" string when not found, or an object when found
+            self.flightroute = try? c.decode(FlightRoute.self, forKey: .flightroute)
+        }
+        enum CodingKeys: String, CodingKey {
+            case flightroute
+        }
     }
-}
-
-private enum AirlineLookup {
-    private static let prefixes: [String: String] = [
-        "CCA": "中国国际航空",
-        "CES": "中国东方航空",
-        "CSN": "中国南方航空",
-        "CHH": "海南航空",
-        "CSC": "四川航空",
-        "CXA": "厦门航空",
-        "CPA": "国泰航空",
-        "ANA": "全日空",
-        "JAL": "日本航空",
-        "KAL": "大韩航空",
-        "AAR": "韩亚航空",
-        "SIA": "新加坡航空",
-        "EVA": "长荣航空",
-        "CAL": "中华航空",
-        "BAW": "英国航空",
-        "DLH": "汉莎航空",
-        "AFR": "法国航空",
-        "KLM": "荷兰皇家航空",
-        "SWR": "瑞士国际航空",
-        "UAE": "阿联酋航空",
-        "QTR": "卡塔尔航空",
-        "THY": "土耳其航空",
-        "UAL": "美联航",
-        "DAL": "达美航空",
-        "AAL": "美国航空",
-        "ASA": "阿拉斯加航空",
-        "QFA": "澳洲航空"
-    ]
-
-    static func name(forCallsign callsign: String) -> String {
-        let prefix = String(callsign.prefix(3)).uppercased()
-        return prefixes[prefix] ?? "商业航班"
+    struct FlightRoute: Decodable {
+        let callsign_iata: String?
+        let airline: AirlineInfo?
+        let origin: AirportInfo?
+        let destination: AirportInfo?
     }
+    struct AirlineInfo: Decodable {
+        let name: String?
+    }
+    struct AirportInfo: Decodable {
+        let iata_code: String?
+        let icao_code: String?
+        let name: String?
+        let municipality: String?
+        let country_iso_name: String?
+        let latitude: Double?
+        let longitude: Double?
+    }
+    let response: Inner
 }

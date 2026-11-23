@@ -7,10 +7,11 @@ enum StratoTheme {
     static let stratosphereIndigo = Color(red: 0.38, green: 0.48, blue: 0.98)
 }
 
+/// Visual-only Liquid Glass surface modifier.
+/// IMPORTANT: Never uses `.interactive()` on container backgrounds so nested Buttons and gestures remain 100% responsive.
 struct StratoGlassSurface<S: Shape>: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let shape: S
-    let interactive: Bool
     let tint: Color?
 
     func body(content: Content) -> some View {
@@ -20,17 +21,9 @@ struct StratoGlassSurface<S: Shape>: ViewModifier {
                 .overlay(shape.stroke(.white.opacity(0.18), lineWidth: 0.8))
         } else {
             if let tint {
-                if interactive {
-                    content.glassEffect(.regular.tint(tint).interactive(), in: shape)
-                } else {
-                    content.glassEffect(.regular.tint(tint), in: shape)
-                }
+                content.glassEffect(.regular.tint(tint), in: shape)
             } else {
-                if interactive {
-                    content.glassEffect(.regular.interactive(), in: shape)
-                } else {
-                    content.glassEffect(.regular, in: shape)
-                }
+                content.glassEffect(.regular, in: shape)
             }
         }
     }
@@ -45,20 +38,18 @@ extension View {
         modifier(
             StratoGlassSurface(
                 shape: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous),
-                interactive: interactive,
                 tint: tint
             )
         )
     }
 
     func stratoGlassCapsule(
-        interactive: Bool = true,
+        interactive: Bool = false,
         tint: Color? = nil
     ) -> some View {
         modifier(
             StratoGlassSurface(
                 shape: Capsule(),
-                interactive: interactive,
                 tint: tint
             )
         )

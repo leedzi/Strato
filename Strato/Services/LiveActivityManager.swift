@@ -30,7 +30,7 @@ final class LiveActivityManager {
                 isLiveADSB: flight.isLiveADSB
             )
             let state = StratoFlightAttributes.ContentState(
-                progress: flight.progress,
+                progress: flight.realFlightProgress,
                 remainingMinutes: remainingMinutes,
                 altitudeFeet: flight.altitudeFeet,
                 groundSpeedKnots: Int(flight.groundSpeedKnots),
