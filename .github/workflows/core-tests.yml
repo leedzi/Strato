@@ -1,0 +1,27 @@
+name: Core tests
+
+on:
+  push:
+    branches: [ v3 ]
+    paths: [ "Core/**", "Tests/**", "Package.swift", ".github/workflows/core-tests.yml" ]
+  workflow_dispatch:
+
+concurrency:
+  group: core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: swift test (platform-independent logic)
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Run tests
+        run: swift test 2>&1 | tee test.log
+      - name: Summary
+        if: always()
+        run: |
+          grep -E "error:|warning: unre|failed|Executed" test.log | tail -60 || true
