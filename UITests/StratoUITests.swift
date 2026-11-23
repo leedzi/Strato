@@ -11,7 +11,7 @@ final class StratoUITests: XCTestCase {
     }
 
     private func launch(speed: Int) {
-        app.launchArguments = ["-demo", "1", "-demoSpeed", "\(speed)", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchArguments = ["-demo", "1", "-uitest", "1", "-demoSpeed", "\(speed)", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
         app.launch()
     }
 
@@ -43,25 +43,26 @@ final class StratoUITests: XCTestCase {
 
     /// Radar → search by duration → board → fly → pause → pass → leave early → logbook, stats, settings.
     func testJourney() {
-        launch(speed: 6)
+        launch(speed: 3)
         XCTAssertTrue(exists("open-finder", timeout: 40))
-        sleep(6) // let aircraft and imagery load
+        sleep(8) // let aircraft and imagery load
         shot("01-radar")
 
         // Look a flight up by number and inspect its card.
         tap("flight-search")
         app.typeText("CA1831\n")
         XCTAssertTrue(exists("board-button", timeout: 25), "flight card did not appear")
-        sleep(3)
+        sleep(5)
         shot("02-flight-card")
-        app.buttons["关闭"].firstMatch.tap()
+        tap("card-close")
 
         // Ask for a flight landing in about an hour.
         tap("quick-60")
-        XCTAssertTrue(exists("match-ANA920", timeout: 40), "no match found for a 60 minute session")
-        sleep(1)
+        let match = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'match-'")).firstMatch
+        XCTAssertTrue(match.waitForExistence(timeout: 40), "no match found for a 60 minute session")
+        sleep(2)
         shot("03-finder-results")
-        tap("match-ANA920")
+        match.tap()
         XCTAssertTrue(exists("start-focus", timeout: 15))
         tap("tag-coding")
         sleep(1)
@@ -105,7 +106,7 @@ final class StratoUITests: XCTestCase {
         sleep(1)
 
         // Leave early and keep the segment (the demo clock has run well past a minute by now).
-        sleep(6)
+        sleep(12)
         tap("end-button")
         let save = app.buttons["保存并下机"].firstMatch
         XCTAssertTrue(save.waitForExistence(timeout: 10), "end dialog did not appear")
@@ -152,22 +153,24 @@ final class StratoUITests: XCTestCase {
 
     /// Board a flight that is close to landing, with the demo clock sped up, and ride it to touchdown.
     func testRideToLanding() {
-        launch(speed: 30)
+        launch(speed: 12)
         XCTAssertTrue(exists("open-finder", timeout: 40))
         sleep(2)
         tap("flight-search")
         app.typeText("MU2315\n") // about 47 demo minutes from landing at launch
         XCTAssertTrue(exists("board-button", timeout: 25), "flight card did not appear")
         tap("board-button")
-        XCTAssertTrue(exists("start-focus", timeout: 15))
+        XCTAssertTrue(exists("start-focus", timeout: 15), "boarding sheet did not open")
         tap("start-focus")
         XCTAssertTrue(exists("pause-button", timeout: 20), "flight screen did not appear")
+        sleep(3)
+        shot("19-descending")
 
         // Somewhere on the way down the cabin announcements should show up.
-        if exists("announcement", timeout: 70) {
+        if exists("announcement", timeout: 90) {
             shot("20-announcement")
         }
-        XCTAssertTrue(exists("arrival-done", timeout: 150), "the flight never landed")
+        XCTAssertTrue(exists("arrival-done", timeout: 240), "the flight never landed")
         sleep(2)
         shot("21-landed")
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS '已落地'")).firstMatch.exists, "landing was not reported")

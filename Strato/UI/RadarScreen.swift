@@ -25,6 +25,8 @@ struct RadarScreen: View {
             if model.session == nil {
                 FlightMapView(
                     provider: model.settings.mapProvider,
+                    initialCenter: model.radarCenter,
+                    initialRadiusKm: model.radarRadiusKm,
                     flights: model.flights + extraFocus,
                     focusID: model.focus?.id,
                     route: model.focus?.route,
@@ -46,7 +48,7 @@ struct RadarScreen: View {
 
             VStack(spacing: 10) {
                 topBar
-                if let note = model.lookupNote ?? model.radarNote {
+                if let note = model.lookupNote ?? (model.focus == nil ? model.radarNote : nil) {
                     Text(note)
                         .font(.footnote.weight(.medium))
                         .padding(.horizontal, 14)
@@ -256,6 +258,7 @@ struct FlightCard: View {
                         .background(.white.opacity(0.14), in: Circle())
                 }
                 .accessibilityLabel("关闭")
+                .accessibilityIdentifier("card-close")
             }
 
             if let route = flight.route {

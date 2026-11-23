@@ -18,6 +18,8 @@ struct FlightScreen: View {
         return ZStack {
             FlightMapView(
                 provider: model.settings.mapProvider,
+                initialCenter: s.flight.state.point,
+                initialRadiusKm: 260,
                 flights: [s.flight],
                 focusID: s.flight.id,
                 route: s.route,
@@ -72,7 +74,6 @@ struct FlightScreen: View {
         }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = model.settings.keepAwake }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
-        .accessibilityIdentifier("flight-screen")
     }
 
     // MARK: Top bar

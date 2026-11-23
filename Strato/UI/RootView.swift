@@ -25,6 +25,7 @@ struct RootView: View {
                     SettingsScreen()
                 }
             }
+            .accessibilityHidden(model.session != nil)
             // The flight screen covers everything while a session is running. It is an overlay
             // rather than a modal so sheets underneath never fight with it.
             if model.session != nil {

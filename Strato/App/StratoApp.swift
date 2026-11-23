@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct StratoApp: App {
@@ -12,6 +13,10 @@ struct StratoApp: App {
         var speed: Double?
         if defaults.bool(forKey: "demo") {
             speed = max(1, defaults.double(forKey: "demoSpeed"))
+        }
+        if defaults.bool(forKey: "uitest") {
+            // UI tests wait for the app to settle before every step; continuous animations make that crawl.
+            UIView.setAnimationsEnabled(false)
         }
         _model = State(initialValue: AppModel(demoSpeed: speed))
     }

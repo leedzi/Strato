@@ -312,6 +312,12 @@ final class AppModel {
 
         if let f = focus, let fresh = merged.first(where: { $0.id == f.id }) {
             focus = LiveFlight(state: fresh.state.inheritingDetails(from: f.state), route: fresh.route ?? f.route)
+        } else if let f = focus, !f.isSimulated {
+            // The selected aircraft is outside the scanned area (found by number, or the map moved on):
+            // keep it current on its own.
+            if case .ok(let fresh) = await adsb.aircraft(hex: f.id), fresh.callsign == f.callsign, focus?.id == f.id {
+                focus = LiveFlight(state: fresh.inheritingDetails(from: f.state), route: f.route)
+            }
         }
         resolveRoutes(for: merged)
     }

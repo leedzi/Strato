@@ -171,13 +171,14 @@ final class AirportView: MKAnnotationView {
     }
 }
 
-final class FlownLine: MKPolyline {}
-final class AheadLine: MKGeodesicPolyline {}
 
 // MARK: - Map view
 
 struct FlightMapView: UIViewRepresentable {
     var provider: MapProvider
+    /// Where the map opens.
+    var initialCenter: GeoPoint
+    var initialRadiusKm: Double = 420
     var flights: [LiveFlight]
     var focusID: String?
     /// Route drawn for the focused flight.
@@ -207,6 +208,11 @@ struct FlightMapView: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.backgroundTapped(_:)))
         tap.delegate = context.coordinator
         map.addGestureRecognizer(tap)
+        let span = min(max(initialRadiusKm, 40), 3000) * 2000
+        map.setRegion(MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: initialCenter.lat, longitude: initialCenter.lon),
+            latitudinalMeters: span, longitudinalMeters: span
+        ), animated: false)
         context.coordinator.attach(map)
         return map
     }
@@ -231,6 +237,10 @@ struct FlightMapView: UIViewRepresentable {
         private var tiles: SatelliteTileOverlay?
         private var labels: LabelTileOverlay?
         private var routeOverlays: [MKOverlay] = []
+        // Overlays are told apart by identity: MKPolyline is created through a factory, so
+        // subclassing it to tag the two lines is not reliable.
+        private var flownOverlay: MKPolyline?
+        private var aheadOverlay: MKPolyline?
         private var routeKey = ""
         private var lastCommandID = -1
         private var userIsMoving = false
@@ -362,9 +372,11 @@ struct FlightMapView: UIViewRepresentable {
             } else {
                 flown = Geo.arc(route.origin.point, here, segments: 32).map(display)
             }
-            let flownLine = FlownLine(coordinates: flown, count: flown.count)
-            var ahead = [display(here), display(route.destination.point)]
-            let aheadLine = AheadLine(coordinates: &ahead, count: 2)
+            let flownLine = MKPolyline(coordinates: flown, count: flown.count)
+            let ahead = [display(here), display(route.destination.point)]
+            let aheadLine = MKGeodesicPolyline(coordinates: ahead, count: 2)
+            flownOverlay = flownLine
+            aheadOverlay = aheadLine
             map.addOverlay(aheadLine, level: .aboveLabels)
             map.addOverlay(flownLine, level: .aboveLabels)
             routeOverlays = [aheadLine, flownLine]
@@ -439,7 +451,7 @@ struct FlightMapView: UIViewRepresentable {
             if let tile = overlay as? MKTileOverlay {
                 return MKTileOverlayRenderer(tileOverlay: tile)
             }
-            if let line = overlay as? FlownLine {
+            if let line = overlay as? MKPolyline, line === flownOverlay {
                 let r = MKPolylineRenderer(polyline: line)
                 r.strokeColor = UIColor(red: 0.36, green: 0.78, blue: 1, alpha: 0.95)
                 r.lineWidth = 3
@@ -447,7 +459,7 @@ struct FlightMapView: UIViewRepresentable {
                 r.lineJoin = .round
                 return r
             }
-            if let line = overlay as? AheadLine {
+            if let line = overlay as? MKPolyline {
                 let r = MKPolylineRenderer(polyline: line)
                 r.strokeColor = UIColor.white.withAlphaComponent(0.8)
                 r.lineWidth = 2
