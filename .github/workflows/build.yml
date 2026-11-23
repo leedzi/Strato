@@ -1,0 +1,159 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, v3 ]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen ldid
+
+      - name: App icon
+        run: swift Scripts/make_icon.swift Strato/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build (device, unsigned)
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild build \
+            -project Strato.xcodeproj -scheme Strato -configuration Release \
+            -destination "generic/platform=iOS" -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build/device.log | grep -E "error|warning: unused|BUILD|^\*\*" || true
+          test -d build/dd/Build/Products/Release-iphoneos/Strato.app
+
+      # Sideloading tools read the entitlements embedded in each binary to know which
+      # capabilities (here: the App Group shared with the widget) to provision when re-signing.
+      - name: Embed entitlements
+        run: |
+          APP=build/dd/Build/Products/Release-iphoneos/Strato.app
+          ldid -SStrato/Resources/Strato.entitlements "$APP/Strato"
+          ldid -SStratoWidget/StratoWidget.entitlements "$APP/PlugIns/StratoWidget.appex/StratoWidget"
+          ldid -e "$APP/Strato" | grep -A2 application-groups
+          ldid -e "$APP/PlugIns/StratoWidget.appex/StratoWidget" | grep -A2 application-groups
+
+      - name: Package
+        run: |
+          APP=build/dd/Build/Products/Release-iphoneos/Strato.app
+          mkdir -p build/full/Payload build/lc/Payload build/out
+          cp -R "$APP" build/full/Payload/
+          cp -R "$APP" build/lc/Payload/
+          rm -rf build/lc/Payload/Strato.app/PlugIns
+          (cd build/full && zip -qry ../out/Strato.ipa Payload)
+          (cd build/lc && zip -qry ../out/Strato-LiveContainer.ipa Payload)
+          cp Strato/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png build/out/icon.png
+          ls -lh build/out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Strato-ipa
+          path: build/out
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: device-build-log
+          path: build/device.log
+          retention-days: 7
+
+  ui:
+    name: Simulator UI tests
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: brew install xcodegen
+
+      - name: App icon
+        run: swift Scripts/make_icon.swift Strato/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Pick a simulator
+        run: |
+          xcrun simctl list runtimes
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json, sys
+          devices = json.load(sys.stdin)['devices']
+          best = None
+          for runtime, items in devices.items():
+              if 'iOS-' not in runtime:
+                  continue
+              version = tuple(int(x) for x in runtime.split('iOS-')[1].split('-'))
+              for d in items:
+                  if d['name'] == 'iPhone 17 Pro' and (best is None or version > best[0]):
+                      best = (version, d['udid'])
+          print(best[1] if best else '')
+          ")
+          test -n "$UDID"
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
+
+      - name: Run UI tests
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild test \
+            -project Strato.xcodeproj -scheme Strato \
+            -destination "id=$UDID" -derivedDataPath build/dd \
+            -resultBundlePath build/ui.xcresult \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee build/ui.log | grep -E "error:|Test Case|Test Suite|XCTAssert|failed|passed|\*\* TEST" || true
+          grep -q "\*\* TEST SUCCEEDED \*\*" build/ui.log
+
+      - name: Export screenshots
+        if: always()
+        run: |
+          mkdir -p build/shots
+          xcrun xcresulttool export attachments --path build/ui.xcresult --output-path build/shots || true
+          python3 - <<'PY'
+          import json, os, shutil
+          root = 'build/shots'
+          manifest = os.path.join(root, 'manifest.json')
+          if os.path.exists(manifest):
+              for test in json.load(open(manifest)):
+                  for a in test.get('attachments', []):
+                      src = os.path.join(root, a['exportedFileName'])
+                      name = a.get('suggestedHumanReadableName') or a['exportedFileName']
+                      base = name.split('_0_')[0].rsplit('.', 1)[0]
+                      if os.path.exists(src) and src.lower().endswith('.png'):
+                          shutil.move(src, os.path.join(root, base + '.png'))
+          print(sorted(os.listdir(root)))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: build/shots
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-test-log
+          path: build/ui.log
+          retention-days: 7

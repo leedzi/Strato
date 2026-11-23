@@ -78,18 +78,25 @@ struct SourceHealth: Sendable, Hashable {
 /// Reads live aircraft positions from the community ADS-B feeds, with failover between them.
 actor ADSBClient {
     private let http: HTTPFetching
+    private let clock: @Sendable () -> Date
+    private let minInterval: TimeInterval?
     private let throttle = HostThrottle()
     private(set) var health: [DataSource: SourceHealth] = [:]
 
-    init(http: HTTPFetching) {
+    /// `clock` stamps positions (a demo can run on a virtual clock); `minInterval` overrides the
+    /// per-host request spacing and is only meant for offline fixtures.
+    init(http: HTTPFetching, clock: @escaping @Sendable () -> Date = { Date() }, minInterval: TimeInterval? = nil) {
         self.http = http
+        self.clock = clock
+        self.minInterval = minInterval
     }
 
     static let maxRadiusNM = 250
 
     private func interval(for source: DataSource) -> TimeInterval {
+        if let minInterval { return minInterval }
         // adsb.fi asks for no more than one request per second; be equally gentle with adsb.lol.
-        source == .adsbfi ? 1.05 : 0.6
+        return source == .adsbfi ? 1.05 : 0.6
     }
 
     private func pointURL(_ source: DataSource, _ p: GeoPoint, _ nm: Int) -> URL? {
@@ -163,15 +170,15 @@ actor ADSBClient {
                 note(source, success: false, latencyMs: nil, retryAfter: result.status == 429 ? (result.retryAfter ?? 30) : nil)
                 return nil
             }
-            let now = Date()
-            guard let list = Feeds.decodeReadsb(result.data, source: source, fetchedAt: now) else {
+            guard let list = Feeds.decodeReadsb(result.data, source: source, fetchedAt: clock()) else {
                 note(source, success: false, latencyMs: nil)
                 return nil
             }
-            note(source, success: true, latencyMs: Int(now.timeIntervalSince(started) * 1000))
+            note(source, success: true, latencyMs: Int(Date().timeIntervalSince(started) * 1000))
             return list
         } catch {
-            note(source, success: false, latencyMs: nil)
+            // A request abandoned because the caller moved on says nothing about the feed.
+            if !Task.isCancelled { note(source, success: false, latencyMs: nil) }
             return nil
         }
     }
@@ -192,15 +199,16 @@ actor ADSBClient {
         guard clean.count == 6, clean.unicodeScalars.allSatisfy({ ($0.value >= 48 && $0.value <= 57) || ($0.value >= 97 && $0.value <= 102) }) else {
             return .notFound
         }
-        var answered = false
         for source in order(preferred: preferred) {
             guard let url = hexURL(source, clean) else { continue }
+            // The feeds share most receivers, so one clear answer is enough; the second feed is
+            // only asked when the first could not be reached (it has a small daily allowance).
             if let list = await fetch(source, url, timeout: 10) {
-                answered = true
                 if let match = list.first(where: { $0.hex == clean }) { return .ok(match) }
+                return .notFound
             }
         }
-        return answered ? .notFound : .failed
+        return .failed
     }
 
     /// Airborne aircraft currently using a radio callsign, across feeds.
@@ -209,7 +217,7 @@ actor ADSBClient {
         guard Callsign.isSafeForURL(cs) else { return [] }
         for source in order(preferred: nil) {
             guard let url = callsignURL(source, cs) else { continue }
-            if let list = await fetch(source, url, timeout: 10), !list.isEmpty { return list }
+            if let list = await fetch(source, url, timeout: 10) { return list }
         }
         return []
     }
@@ -242,7 +250,7 @@ actor OpenSkyClient {
         }
         if let running = inFlight { return await running.value }
         let task = Task<[AircraftState]?, Never> { [http] in
-            guard let url = URL(string: "https://opensky-network.org/api/states/all") else { return nil }
+            guard let url = URL(string: "https://opensky-network.org/api/states/all?extended=1") else { return nil }
             do {
                 let result = try await http.get(url, timeout: 40)
                 guard result.status == 200 else {

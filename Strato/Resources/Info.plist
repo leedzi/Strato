@@ -3,7 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
+    <string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>Strato</string>
     <key>CFBundleExecutable</key>
@@ -26,21 +30,25 @@
     <true/>
     <key>NSSupportsLiveActivities</key>
     <true/>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>用来把雷达移到你所在的位置，看看头顶有哪些航班。位置不会离开这台设备。</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
-        <true/>
+        <false/>
     </dict>
     <key>UILaunchScreen</key>
     <dict>
         <key>UIColorName</key>
-        <string>AccentColor</string>
+        <string>LaunchBackground</string>
     </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
-        <string>UIInterfaceOrientationLandscapeLeft</string>
-        <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>

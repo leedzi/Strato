@@ -23,7 +23,8 @@ enum Matching {
         targetMinutes: Int,
         destination: Airport?,
         now: Date,
-        strict: Bool = true
+        strict: Bool = true,
+        maxAge: TimeInterval = 180
     ) -> [FlightMatch] {
         let window = tolerance(forTarget: targetMinutes)
         var out: [FlightMatch] = []
@@ -32,7 +33,7 @@ enum Matching {
             if let destination, route.destination.code != destination.code { continue }
             if f.state.onGround { continue }
             // Stale positions make for wrong estimates.
-            guard now.timeIntervalSince(f.state.positionTime) < 180 else { continue }
+            guard now.timeIntervalSince(f.state.positionTime) < maxAge else { continue }
             let landing = FlightMath.estimatedLanding(state: f.state, route: route)
             let minutes = Int((landing.timeIntervalSince(now) / 60).rounded())
             guard minutes >= 3 else { continue }
@@ -55,9 +56,9 @@ enum Matching {
 
     /// Before a route is known, how promising is an aircraft for a session of `targetMinutes`?
     /// Higher is better; nil means not worth a route lookup. Used to spend lookups wisely.
-    static func lookupPriority(state: AircraftState, targetMinutes: Int, destination: Airport?, now: Date) -> Double? {
+    static func lookupPriority(state: AircraftState, targetMinutes: Int, destination: Airport?, now: Date, maxAge: TimeInterval = 180) -> Double? {
         guard state.hasAirlineCallsign, !state.onGround else { return nil }
-        guard now.timeIntervalSince(state.positionTime) < 180 else { return nil }
+        guard now.timeIntervalSince(state.positionTime) < maxAge else { return nil }
         let alt = state.altitudeFt ?? 0
         let gs = state.groundSpeedKt ?? 0
         guard gs > 120 else { return nil }

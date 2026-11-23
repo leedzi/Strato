@@ -137,11 +137,24 @@ enum Feeds {
                 trackDeg: (row[10] as? NSNumber)?.doubleValue,
                 verticalRateFpm: vsMS.map { Int(($0 * 196.8504).rounded()) },
                 squawk: row.count > 14 ? row[14] as? String : nil,
+                category: row.count > 17 ? openSkyCategory((row[17] as? NSNumber)?.intValue) : nil,
                 positionTime: when,
                 source: .opensky
             ))
         }
         return out
+    }
+
+    /// OpenSky numbers emitter categories; map the airliner sizes onto the ADS-B "A" codes used elsewhere.
+    private static func openSkyCategory(_ value: Int?) -> String? {
+        switch value {
+        case 2: return "A1"
+        case 3: return "A2"
+        case 4: return "A3"
+        case 5: return "A4"
+        case 6: return "A5"
+        default: return nil
+        }
     }
 
     // MARK: Routes

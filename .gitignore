@@ -1,1 +1,11 @@
 .alma-snapshots
+.DS_Store
+build/
+DerivedData/
+*.xcodeproj
+.build/
+.swiftpm/
+outputs/
+tmp/
+work/
+__pycache__/

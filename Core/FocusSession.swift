@@ -52,6 +52,10 @@ struct FocusSession: Codable, Sendable, Identifiable {
     var track: [TrackPoint]
     var announced: [String]
     var maxAltitudeFt: Int
+    /// Set once a position report shows the aircraft down at its destination.
+    var touchdown: Date?
+    /// True when nobody was watching at the moment of touchdown, so its time is a best guess.
+    var touchdownEstimated: Bool
 
     init(
         id: UUID = UUID(),
@@ -94,6 +98,8 @@ struct FocusSession: Codable, Sendable, Identifiable {
         )]
         self.announced = []
         self.maxAltitudeFt = flight.state.altitudeFt ?? 0
+        self.touchdown = nil
+        self.touchdownEstimated = false
     }
 
     // MARK: Timing
@@ -164,11 +170,26 @@ struct FocusSession: Codable, Sendable, Identifiable {
     /// Applies a fresh position report.
     mutating func apply(fix: AircraftState, at now: Date) {
         let merged = fix.inheritingDetails(from: flight.state)
+        let gap = merged.positionTime.timeIntervalSince(lastFixAt)
+        let priorEstimate = estimatedLanding
+        let priorFixAt = lastFixAt
         flight.state = merged
-        lastFixAt = merged.positionTime
+        lastFixAt = max(lastFixAt, merged.positionTime)
         consecutiveMisses = 0
         maxAltitudeFt = max(maxAltitudeFt, merged.altitudeFt ?? 0)
-        if !FlightMath.hasLanded(state: merged, route: route) {
+        if FlightMath.hasLanded(state: merged, route: route) {
+            if touchdown == nil {
+                if gap > 240 {
+                    // It landed while nobody was watching (app suspended or closed). The earlier
+                    // estimate is the best guess, bounded by the two reports either side of it.
+                    touchdown = min(max(priorEstimate, priorFixAt), merged.positionTime)
+                    touchdownEstimated = true
+                } else {
+                    touchdown = merged.positionTime
+                    touchdownEstimated = false
+                }
+            }
+        } else {
             let estimate = FlightMath.estimatedLanding(state: merged, route: route)
             // Never claim a landing in the past while the aircraft is still flying.
             estimatedLanding = max(estimate, now.addingTimeInterval(30))
@@ -181,6 +202,24 @@ struct FocusSession: Codable, Sendable, Identifiable {
             gsKt: Int(merged.groundSpeedKt ?? 0),
             live: true
         ))
+    }
+
+    /// Advances a simulated flight to `now`. Its schedule is fixed, so the estimate is left alone.
+    mutating func refreshSimulated(at now: Date) {
+        guard flight.isSimulated else { return }
+        let s = SimFlight.state(route: route, landing: estimatedLanding, at: now, hex: flight.state.hex, callsign: flight.callsign)
+        flight.state = s.inheritingDetails(from: flight.state)
+        lastFixAt = now
+        consecutiveMisses = 0
+        maxAltitudeFt = max(maxAltitudeFt, s.altitudeFt ?? 0)
+        appendTrack(TrackPoint(t: now, lat: s.lat, lon: s.lon, altFt: s.altitudeFt ?? 0, gsKt: Int(s.groundSpeedKt ?? 0), live: false))
+    }
+
+    /// Whether a report for this airframe still belongs to the flight being followed. The same
+    /// aircraft flies several legs a day, so a different callsign means it has moved on.
+    func accepts(_ fix: AircraftState) -> Bool {
+        if !fix.callsign.isEmpty, !flight.callsign.isEmpty, fix.callsign != flight.callsign { return false }
+        return true
     }
 
     mutating func recordMiss() {
@@ -217,16 +256,15 @@ struct FocusSession: Codable, Sendable, Identifiable {
         if flight.isSimulated {
             return now >= estimatedLanding ? Completion(outcome: .landed, endedAt: estimatedLanding, estimated: false) : nil
         }
-        if FlightMath.hasLanded(state: flight.state, route: route) {
-            let when = min(now, max(flight.state.positionTime, startedAt))
-            return Completion(outcome: .landed, endedAt: when, estimated: false)
+        if let touchdown {
+            return Completion(outcome: .landed, endedAt: min(now, max(touchdown, startedAt)), estimated: touchdownEstimated)
         }
         let silence = now.timeIntervalSince(lastFixAt)
         if silence > 100 {
             if FlightMath.vanishedOnFinal(lastSeen: flight.state, route: route) {
                 let remaining = Geo.distanceKm(flight.state.point, route.destination.point)
-                let touchdown = lastFixAt.addingTimeInterval(FlightMath.terminalMinutes(forKm: remaining) * 60)
-                if now >= touchdown { return Completion(outcome: .landed, endedAt: touchdown, estimated: true) }
+                let expected = lastFixAt.addingTimeInterval(FlightMath.terminalMinutes(forKm: remaining) * 60)
+                if now >= expected { return Completion(outcome: .landed, endedAt: expected, estimated: true) }
             }
             if now >= estimatedLanding.addingTimeInterval(45) {
                 return Completion(outcome: .landed, endedAt: estimatedLanding, estimated: true)

@@ -18,6 +18,7 @@ struct ReferenceData: Sendable {
     private let byIATA: [String: Int]
     private let byICAO: [String: Int]
     private let airlinesByICAO: [String: Airline]
+    private let airlinesByIATA: [String: [Airline]]
 
     static let empty = ReferenceData(airports: [], airlines: [])
 
@@ -47,8 +48,13 @@ struct ReferenceData: Sendable {
         self.byIATA = iataIndex
         self.byICAO = icaoIndex
         var airlineIndex: [String: Airline] = [:]
-        for l in airlines where airlineIndex[l.icao] == nil { airlineIndex[l.icao] = l }
+        var iataAirlines: [String: [Airline]] = [:]
+        for l in airlines where airlineIndex[l.icao] == nil {
+            airlineIndex[l.icao] = l
+            if !l.iata.isEmpty { iataAirlines[l.iata, default: []].append(l) }
+        }
         self.airlinesByICAO = airlineIndex
+        self.airlinesByIATA = iataAirlines
     }
 
     init(airportsTSV: String, airlinesTSV: String) {
@@ -80,16 +86,23 @@ struct ReferenceData: Sendable {
             let iata = String(f[0])
             let icao = String(f[1])
             guard !iata.isEmpty || !icao.isEmpty else { continue }
+            let country = String(f[5])
+            var tz = String(f[6])
+            // Mainland China keeps a single time zone, so a missing entry there is safe to fill in.
+            if tz.isEmpty, country == "CN" { tz = "Asia/Shanghai" }
+            // "Shanghai (Pudong)" -> "Shanghai": the bracketed district is noise on a boarding pass.
+            var cityEN = String(f[8])
+            if let bracket = cityEN.range(of: " (") { cityEN = String(cityEN[..<bracket.lowerBound]) }
             result.append(Airport(
                 iata: iata,
                 icao: icao,
                 lat: lat,
                 lon: lon,
                 elevationFt: Int(f[4]),
-                country: String(f[5]),
-                tz: String(f[6]),
+                country: country,
+                tz: tz,
                 size: AirportSize(rawValue: String(f[7])) ?? .small,
-                cityEN: String(f[8]),
+                cityEN: cityEN,
                 nameEN: String(f[9]),
                 cityZH: String(f[10]),
                 nameZH: String(f[11])
@@ -126,6 +139,28 @@ struct ReferenceData: Sendable {
     func airline(icao: String?) -> Airline? {
         guard let icao, icao.count == 3 else { return nil }
         return airlinesByICAO[icao.uppercased()]
+    }
+
+    /// Radio callsigns a typed flight number could mean: "CA1831" -> ["CCA1831"], "CCA1831" -> itself.
+    /// IATA codes are reused between airlines, so there can be more than one candidate.
+    func callsignCandidates(forFlightNumber text: String) -> [String] {
+        let s = String(text.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) })
+        guard s.count >= 3, s.count <= 8 else { return [] }
+        var out: [String] = []
+        if Callsign.isAirline(s) { out.append(s) }
+        let prefix = String(s.prefix(2))
+        let rest = String(s.dropFirst(2))
+        if let first = rest.first, first.isNumber, let matches = airlinesByIATA[prefix] {
+            // Airlines with a Chinese name are the well-known ones; try those first.
+            let ordered = matches.sorted { !$0.nameZH.isEmpty && $1.nameZH.isEmpty }
+            for airline in ordered.prefix(4) {
+                // Operators usually drop leading zeros on the radio.
+                let trimmed = String(rest.drop { $0 == "0" })
+                out.append(airline.icao + (trimmed.isEmpty ? "0" : trimmed))
+            }
+        }
+        var seen = Set<String>()
+        return out.filter { Callsign.isSafeForURL($0) && seen.insert($0).inserted }
     }
 
     func airlineName(icao: String?, fallback: String? = nil) -> String {

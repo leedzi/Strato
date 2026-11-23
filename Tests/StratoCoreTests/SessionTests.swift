@@ -62,8 +62,10 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(s.estimatedLanding.timeIntervalSince(firstEstimate), 0, accuracy: 8 * 60) // estimate moves, not wildly
         XCTAssertEqual(s.progress(at: t1).fraction, 0.96, accuracy: 0.005)
 
-        // On the ground at the destination.
+        // Still being watched on short final, then on the ground at the destination.
         let t2 = t1.addingTimeInterval(700)
+        s.apply(fix: Fixtures.cruising(route, fraction: 0.995, at: t2.addingTimeInterval(-60), alt: 1500, gs: 150, vs: -700), at: t2.addingTimeInterval(-60))
+        XCTAssertNil(s.completion(at: t2.addingTimeInterval(-59)))
         var down = Fixtures.cruising(route, fraction: 1.0, at: t2, alt: 0, gs: 40)
         down.onGround = true
         s.apply(fix: down, at: t2)
@@ -77,6 +79,41 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(record.destination.code, "HND")
         XCTAssertEqual(record.boardedFraction, 0.90, accuracy: 0.005)
         XCTAssertGreaterThan(record.path.count, 1)
+    }
+
+    func testLandingWhileNobodyWasWatchingUsesTheEstimate() {
+        var s = session(fraction: 0.90)
+        let route = s.route
+        let eta = s.estimatedLanding
+        // The app was closed for five hours; the airframe is now parked at the destination.
+        let reopened = Fixtures.t0.addingTimeInterval(5 * 3600)
+        var parked = Fixtures.cruising(route, fraction: 1.0, at: reopened, alt: 0, gs: 0)
+        parked.onGround = true
+        XCTAssertTrue(s.accepts(parked))
+        s.apply(fix: parked, at: reopened)
+        let done = s.completion(at: reopened)
+        XCTAssertEqual(done?.outcome, .landed)
+        XCTAssertEqual(done?.estimated, true)
+        XCTAssertEqual(done?.endedAt, eta) // credited up to the expected touchdown, not five hours
+        XCTAssertEqual(Double(s.record(done!).focusSeconds), eta.timeIntervalSince(Fixtures.t0), accuracy: 1)
+
+        // The same airframe on its next leg uses another callsign and must be ignored.
+        var nextLeg = parked
+        nextLeg.callsign = "ANA919"
+        XCTAssertFalse(s.accepts(nextLeg))
+    }
+
+    func testSimulatedRefreshKeepsTheSchedule() {
+        let made = SimFlight.make(origin: Fixtures.pvg, destination: Fixtures.hnd, minutes: 90, airlineICAO: "ANA", flightDigits: 920, reference: Fixtures.reference, now: Fixtures.t0)
+        var s = FocusSession(flight: made.flight, route: made.flight.route!, tag: .study, seat: "1A", cabin: .first, gate: "A1", sequence: 1, startedAt: Fixtures.t0, timerMinutes: nil)
+        s.estimatedLanding = made.landing
+        for minute in stride(from: 1, through: 89, by: 1) {
+            s.refreshSimulated(at: Fixtures.t0.addingTimeInterval(Double(minute) * 60))
+        }
+        XCTAssertEqual(s.estimatedLanding, made.landing)
+        XCTAssertGreaterThan(s.track.count, 60)
+        XCTAssertGreaterThan(s.maxAltitudeFt, 30000)
+        XCTAssertNil(s.completion(at: made.landing.addingTimeInterval(-30)))
     }
 
     func testLostSignalFallsBackToTheEstimate() {

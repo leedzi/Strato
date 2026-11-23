@@ -233,7 +233,7 @@ final class FeedTests: XCTestCase {
     func testOpenSkyDecoding() throws {
         let json = """
         {"time":1795000000,"states":[
-         ["39de4e","TVF55MC ","France",1794999990,1794999995,-0.9785,43.7736,11887.2,false,214.21,207.3,0,null,12047.22,"7640",false,0],
+         ["39de4e","TVF55MC ","France",1794999990,1794999995,-0.9785,43.7736,11887.2,false,214.21,207.3,0,null,12047.22,"7640",false,0,6],
          ["780abc","CCA981  ","China",1794999998,1794999999,116.6,40.07,null,true,5.1,90.0,null,null,null,null,false,0],
          ["bad"]
         ]}
@@ -241,6 +241,8 @@ final class FeedTests: XCTestCase {
         let list = try XCTUnwrap(Feeds.decodeOpenSky(json, fetchedAt: Fixtures.t0))
         XCTAssertEqual(list.count, 2)
         XCTAssertEqual(list[0].callsign, "TVF55MC")
+        XCTAssertEqual(list[0].category, "A5")
+        XCTAssertNil(list[1].category)
         XCTAssertEqual(list[0].altitudeFt ?? 0, 39000, accuracy: 10)
         XCTAssertEqual(list[0].groundSpeedKt ?? 0, 416.4, accuracy: 0.5)
         XCTAssertEqual(list[0].positionTime.timeIntervalSince(Fixtures.t0), -10, accuracy: 0.001)
@@ -306,6 +308,10 @@ final class FeedTests: XCTestCase {
         XCTAssertNil(ref.airport(code: "XXX")?.elevationFt)
         XCTAssertNil(ref.airport(code: "XXX")?.timeZone)
         XCTAssertEqual(ref.airline(icao: "CCA")?.name, "中国国际航空")
+        XCTAssertEqual(ref.callsignCandidates(forFlightNumber: "ca1831"), ["CCA1831"])
+        XCTAssertEqual(ref.callsignCandidates(forFlightNumber: "CA 0981"), ["CCA981"])
+        XCTAssertEqual(ref.callsignCandidates(forFlightNumber: "CCA1831"), ["CCA1831"])
+        XCTAssertEqual(ref.callsignCandidates(forFlightNumber: "ZZ"), [])
         XCTAssertEqual(ref.searchAirports("上海").first?.iata, "PVG")
         XCTAssertEqual(ref.searchAirports("pvg").first?.iata, "PVG")
         XCTAssertEqual(ref.nearestAirport(to: GeoPoint(31.2, 121.5))?.airport.iata, "PVG")
