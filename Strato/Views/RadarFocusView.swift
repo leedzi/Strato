@@ -14,6 +14,7 @@ struct RadarFocusView: View {
     @State private var boardingCandidate: LiveFlight?
     @State private var showEarlyLandDialog = false
     @State private var showBoardingPassInspector = false
+    @State private var currentMapCenter = CLLocationCoordinate2D(latitude: 33.5, longitude: 126.5)
 
     private var displayedFlight: LiveFlight? {
         store.activeFlight ?? store.selectedFlight
@@ -44,6 +45,9 @@ struct RadarFocusView: View {
                         store.selectedFlight = flight
                         focusCamera(on: flight, mode: .follow3D)
                     }
+                },
+                onRegionChangedByUser: { newCenter in
+                    currentMapCenter = newCenter
                 }
             )
             .ignoresSafeArea()
@@ -190,7 +194,12 @@ struct RadarFocusView: View {
 
                     if !store.isFlying {
                         Divider()
-                        Picker("扫描范围", selection: Binding(
+                        Button {
+                            Task { await store.refreshRadar(customCenter: currentMapCenter) }
+                        } label: {
+                            Label("扫描当前地图中心空域 (250NM)", systemImage: "dot.radiowaves.left.and.right")
+                        }
+                        Picker("默认扫描范围", selection: Binding(
                             get: { store.selectedScope },
                             set: { newScope in
                                 store.selectedScope = newScope

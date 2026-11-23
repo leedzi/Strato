@@ -11,8 +11,8 @@ public enum StratoMapProvider: String, CaseIterable, Identifiable, Sendable {
 
     public var title: String {
         switch self {
-        case .autoHybrid: return "智能混合 (国内高德 / 海外谷歌)"
-        case .apple3DFlyover: return "Apple 3D 立体地球地景"
+        case .autoHybrid: return "智能混合 (国内高德 / 海外谷歌卫星)"
+        case .apple3DFlyover: return "Apple 3D 立体地球地景 (Flyover)"
         case .amapChina: return "高德高清地图 (AutoNavi)"
         case .googleSatellite: return "Google 全球高清卫星"
         }
@@ -28,54 +28,97 @@ public enum StratoMapProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Custom MKTileOverlay that dynamically routes tile requests:
-/// - Inside China bounding box (Lat 18...53.8, Lon 73...135.2) -> AutoNavi (Gaode / Amap) HD tiles
-/// - Outside China -> Google Hybrid Satellite HD tiles
+/// Smart Multi-Source Tile Overlay:
+/// - Inside China -> AutoNavi (Gaode) HD tiles
+/// - Outside China -> Google Hybrid Satellite HD tiles (`mt.google.com/vt/lyrs=y`)
+/// - Automatic Domestic Network Failover -> If Google tiles time out (e.g. without VPN in China),
+///   seamlessly falls back to ArcGIS World Imagery HD Global Satellite tiles so the map is NEVER blank.
 final class SmartGlobalTileOverlay: MKTileOverlay {
     let provider: StratoMapProvider
+
+    private static let tileSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 3.5
+        cfg.timeoutIntervalForResource = 6.0
+        cfg.urlCache = URLCache(memoryCapacity: 48 * 1024 * 1024, diskCapacity: 180 * 1024 * 1024)
+        cfg.requestCachePolicy = .returnCacheDataElseLoad
+        return URLSession(configuration: cfg)
+    }()
 
     init(provider: StratoMapProvider) {
         self.provider = provider
         super.init(urlTemplate: nil)
         self.canReplaceMapContent = true
-        self.maximumZ = 19
+        self.tileSize = CGSize(width: 256, height: 256)
+        self.maximumZ = 18
         self.minimumZ = 2
     }
 
-    override func url(forTilePath path: MKTileOverlayPath) -> URL {
+    override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
+        let primaryURL = primaryTileURL(for: path)
+        var req = URLRequest(url: primaryURL)
+        req.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            forHTTPHeaderField: "User-Agent"
+        )
+
+        Self.tileSession.dataTask(with: req) { [weak self] data, response, error in
+            if let data, !data.isEmpty,
+               let http = response as? HTTPURLResponse,
+               (200...299).contains(http.statusCode) {
+                result(data, nil)
+                return
+            }
+
+            // Failover to global direct-connect satellite imagery (ArcGIS World Imagery) if Google is unreachable
+            guard let self else {
+                result(nil, error)
+                return
+            }
+            let fallbackURL = self.fallbackSatelliteURL(for: path)
+            var fallbackReq = URLRequest(url: fallbackURL)
+            fallbackReq.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+            Self.tileSession.dataTask(with: fallbackReq) { fbData, _, fbErr in
+                result(fbData, fbErr)
+            }.resume()
+        }.resume()
+    }
+
+    private func primaryTileURL(for path: MKTileOverlayPath) -> URL {
         let x = path.x
         let y = path.y
         let z = path.z
+        let server14 = ((x + y) % 4) + 1
+        let server03 = (x + y) % 4
 
-        let useAmap: Bool
         switch provider {
         case .amapChina:
-            useAmap = true
+            // Gaode bilingual HD road + terrain map
+            return URL(string: "https://webrd0\(server14).is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=\(x)&y=\(y)&z=\(z)")!
+
         case .googleSatellite, .apple3DFlyover:
-            useAmap = false
+            return URL(string: "https://mt\(server03).google.com/vt/lyrs=y&hl=zh-CN&x=\(x)&y=\(y)&z=\(z)")!
+
         case .autoHybrid:
             let coord = Self.tileToCoordinate(x: x, y: y, z: z)
-            useAmap = Self.isInsideChina(coord)
-        }
-
-        if useAmap {
-            // AutoNavi (Gaode) satellite + road hybrid or dark road vector depending on zoom
-            let server = ((x + y) % 4) + 1
-            if z <= 8 {
-                // High-altitude stratospheric view: Gaode Satellite imagery
-                let urlStr = "https://webst0\(server).is.autonavi.com/appmaptile?style=6&x=\(x)&y=\(y)&z=\(z)"
-                return URL(string: urlStr)!
+            if Self.isInsideChina(coord) {
+                if z <= 6 {
+                    // Stratospheric overview: Gaode Satellite imagery for seamless stitching
+                    return URL(string: "https://webst0\(server14).is.autonavi.com/appmaptile?style=6&x=\(x)&y=\(y)&z=\(z)")!
+                } else {
+                    // Regional / City / Airport zoom inside China: Gaode HD Chinese Vector Map
+                    return URL(string: "https://webrd0\(server14).is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=\(x)&y=\(y)&z=\(z)")!
+                }
             } else {
-                // Detailed China city & airport view: Gaode HD bilingual vector map
-                let urlStr = "https://webrd0\(server).is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=2&style=8&x=\(x)&y=\(y)&z=\(z)"
-                return URL(string: urlStr)!
+                // Overseas: Google Hybrid Satellite + Roads
+                return URL(string: "https://mt\(server03).google.com/vt/lyrs=y&hl=zh-CN&x=\(x)&y=\(y)&z=\(z)")!
             }
-        } else {
-            // Google Hybrid Satellite + Roads & Labels (lyrs=y)
-            let server = (x + y) % 4
-            let urlStr = "https://mt\(server).google.com/vt/lyrs=y&hl=zh-CN&x=\(x)&y=\(y)&z=\(z)&scale=2"
-            return URL(string: urlStr)!
         }
+    }
+
+    private func fallbackSatelliteURL(for path: MKTileOverlayPath) -> URL {
+        // High-res global satellite imagery accessible worldwide without VPN
+        return URL(string: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/\(path.z)/\(path.y)/\(path.x)")!
     }
 
     private static func tileToCoordinate(x: Int, y: Int, z: Int) -> CLLocationCoordinate2D {
@@ -87,13 +130,12 @@ final class SmartGlobalTileOverlay: MKTileOverlay {
     }
 
     private static func isInsideChina(_ coord: CLLocationCoordinate2D) -> Bool {
-        // Rough bounding box covering Mainland China, HK, Macau, and Taiwan
         return coord.latitude >= 18.0 && coord.latitude <= 53.6
             && coord.longitude >= 73.5 && coord.longitude <= 135.1
     }
 }
 
-// MARK: - UIKit MKMapView Bridge for Custom Tile Providers (Amap + Google + 3D Pitch)
+// MARK: - 120Hz Diff-Updated UIKit MKMapView Bridge
 
 struct HybridTileMapView: UIViewRepresentable {
     let provider: StratoMapProvider
@@ -106,6 +148,7 @@ struct HybridTileMapView: UIViewRepresentable {
     let cameraHeading: CLLocationDirection
     let cameraTriggerID: Int
     let onSelectFlight: (LiveFlight) -> Void
+    let onRegionChangedByUser: (CLLocationCoordinate2D) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -136,6 +179,10 @@ struct HybridTileMapView: UIViewRepresentable {
         private var tileOverlay: SmartGlobalTileOverlay?
         private var lastCameraTriggerID: Int = -1
 
+        // Route caching so we don't tear down overlays every 1-second tick
+        private var renderedRouteFlightID: String?
+        private var lastRouteOriginCoord: CLLocationCoordinate2D?
+
         init(parent: HybridTileMapView) {
             self.parent = parent
         }
@@ -150,13 +197,13 @@ struct HybridTileMapView: UIViewRepresentable {
             }
 
             if provider == .apple3DFlyover {
-                let config = MKImageryMapConfiguration(elevationStyle: .realistic)
+                let config = MKHybridMapConfiguration(elevationStyle: .realistic)
                 mapView.preferredConfiguration = config
             } else {
                 let config = MKStandardMapConfiguration(elevationStyle: .realistic, emphasisStyle: .muted)
                 mapView.preferredConfiguration = config
                 let overlay = SmartGlobalTileOverlay(provider: provider)
-                mapView.addOverlay(overlay, level: .aboveLabels)
+                mapView.addOverlay(overlay, level: .aboveRoads)
                 self.tileOverlay = overlay
             }
         }
@@ -176,41 +223,50 @@ struct HybridTileMapView: UIViewRepresentable {
         }
 
         func syncAnnotationsAndRoutes(on mapView: MKMapView) {
-            // Remove old route polylines (keep tile overlay!)
-            let nonTileOverlays = mapView.overlays.filter { !($0 is SmartGlobalTileOverlay) }
-            mapView.removeOverlays(nonTileOverlays)
-
-            // Draw Great Circle route for focused flight
-            if let focused = parent.focusedFlight, let dest = focused.destination {
-                if let orig = focused.origin {
-                    var flownCoords = GreatCircle.arcCoordinates(from: orig.coordinate, to: focused.coordinate, segments: 28)
-                    let flownLine = FlownRoutePolyline(coordinates: &flownCoords, count: flownCoords.count)
-                    mapView.addOverlay(flownLine, level: .aboveLabels)
+            // 1. Only rebuild route polyline if the focused flight changed or moved > 8 km
+            let focused = parent.focusedFlight
+            let shouldRebuildRoute: Bool = {
+                guard let focused else { return renderedRouteFlightID != nil }
+                if renderedRouteFlightID != focused.id { return true }
+                if let lastCoord = lastRouteOriginCoord {
+                    return GreatCircle.distanceKM(from: lastCoord, to: focused.coordinate) > 8.0
                 }
-                var remCoords = GreatCircle.arcCoordinates(from: focused.coordinate, to: dest.coordinate, segments: 32)
-                let remLine = RemainingRoutePolyline(coordinates: &remCoords, count: remCoords.count)
-                mapView.addOverlay(remLine, level: .aboveLabels)
+                return true
+            }()
+
+            if shouldRebuildRoute {
+                let routeOverlays = mapView.overlays.filter { !($0 is SmartGlobalTileOverlay) }
+                mapView.removeOverlays(routeOverlays)
+                renderedRouteFlightID = focused?.id
+                lastRouteOriginCoord = focused?.coordinate
+
+                if let focused, let dest = focused.destination {
+                    if let orig = focused.origin {
+                        var flownCoords = GreatCircle.arcCoordinates(from: orig.coordinate, to: focused.coordinate, segments: 28)
+                        let flownLine = FlownRoutePolyline(coordinates: &flownCoords, count: flownCoords.count)
+                        mapView.addOverlay(flownLine, level: .aboveLabels)
+                    }
+                    var remCoords = GreatCircle.arcCoordinates(from: focused.coordinate, to: dest.coordinate, segments: 32)
+                    let remLine = RemainingRoutePolyline(coordinates: &remCoords, count: remCoords.count)
+                    mapView.addOverlay(remLine, level: .aboveLabels)
+                }
             }
 
-            // Sync aircraft annotations efficiently
+            // 2. Diff-update aircraft annotations smoothly without interrupting user touches
             let existingByID: [String: FlightMapAnnotation] = Dictionary(
                 uniqueKeysWithValues: mapView.annotations.compactMap { $0 as? FlightMapAnnotation }.map { ($0.flight.id, $0) }
             )
             let desiredIDs = Set(parent.flights.map(\.id))
 
-            // Remove stale
             for (id, anno) in existingByID where !desiredIDs.contains(id) {
                 mapView.removeAnnotation(anno)
             }
 
-            // Update or add
             for flight in parent.flights {
                 let isSelected = flight.id == parent.focusedFlight?.id
                 let isActive = flight.id == parent.activeFlightID
                 if let existing = existingByID[flight.id] {
-                    UIView.animate(withDuration: 0.45) {
-                        existing.coordinate = flight.coordinate
-                    }
+                    existing.coordinate = flight.coordinate
                     existing.flight = flight
                     existing.isSelected = isSelected
                     existing.isActive = isActive
@@ -222,6 +278,10 @@ struct HybridTileMapView: UIViewRepresentable {
                     mapView.addAnnotation(anno)
                 }
             }
+        }
+
+        func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            parent.onRegionChangedByUser(mapView.centerCoordinate)
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -236,8 +296,8 @@ struct HybridTileMapView: UIViewRepresentable {
             }
             if let rem = overlay as? RemainingRoutePolyline {
                 let r = MKPolylineRenderer(polyline: rem)
-                r.strokeColor = UIColor.white.withAlphaComponent(0.6)
-                r.lineWidth = 2.0
+                r.strokeColor = UIColor.white.withAlphaComponent(0.65)
+                r.lineWidth = 2.2
                 r.lineDashPattern = [6, 5]
                 return r
             }
@@ -300,7 +360,7 @@ private final class FlightAnnotationView: MKAnnotationView {
         callsignLabel.textAlignment = .center
         callsignLabel.font = UIFont.monospacedSystemFont(ofSize: 9.5, weight: .bold)
         callsignLabel.textColor = .white
-        callsignLabel.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+        callsignLabel.backgroundColor = UIColor.black.withAlphaComponent(0.78)
         callsignLabel.layer.cornerRadius = 7
         callsignLabel.layer.masksToBounds = true
         addSubview(callsignLabel)
@@ -326,7 +386,6 @@ private final class FlightAnnotationView: MKAnnotationView {
         }
         iconView.tintColor = tintColor
 
-        // UIImage("airplane") points East (90°); rotate to true track
         let radians = CGFloat((anno.flight.trackDegrees - 90.0) * .pi / 180.0)
         iconView.transform = CGAffineTransform(rotationAngle: radians)
 
