@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Strato · 平流层 — iOS 26 Liquid Glass 交互预览</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --sky-cyan: #59d1ff;
+      --radar-emerald: #40e6a6;
+      --amber-beacon: #ffb847;
+      --glass-bg: rgba(18, 26, 44, 0.56);
+      --glass-border: rgba(255, 255, 255, 0.22);
+      --glass-highlight: rgba(255, 255, 255, 0.12);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif; user-select: none; }
+    body {
+      background: radial-gradient(circle at 20% 20%, #0d1b36 0%, #050811 70%);
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      gap: 28px;
+      flex-wrap: wrap;
+    }
+
+    /* Left Showcase Panel */
+    .showcase-info {
+      max-width: 340px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .badge-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pill-tag {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: rgba(89, 209, 255, 0.15);
+      border: 1px solid rgba(89, 209, 255, 0.4);
+      color: var(--sky-cyan);
+    }
+    .showcase-info h1 {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #fff 30%, var(--sky-cyan) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .showcase-info p {
+      font-size: 13.5px;
+      line-height: 1.65;
+      color: rgba(255, 255, 255, 0.72);
+    }
+    .feature-box {
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      font-size: 12.5px;
+      line-height: 1.6;
+      color: rgba(255, 255, 255, 0.85);
+    }
+    .feature-box strong { color: var(--sky-cyan); }
+
+    /* iPhone 16/17 Pro Frame */
+    .iphone-frame {
+      width: 392px;
+      height: 812px;
+      border-radius: 54px;
+      background: #000;
+      padding: 12px;
+      box-shadow:
+        0 0 0 2px rgba(255, 255, 255, 0.16),
+        0 30px 80px rgba(0, 0, 0, 0.75),
+        0 0 60px rgba(89, 209, 255, 0.12);
+      position: relative;
+      overflow: hidden;
+    }
+    .screen {
+      width: 100%;
+      height: 100%;
+      border-radius: 44px;
+      position: relative;
+      overflow: hidden;
+      background: #070d19;
+    }
+
+    /* Dynamic Island */
+    .dynamic-island {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1200;
+      min-width: 126px;
+      height: 34px;
+      padding: 0 14px;
+      background: #000;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      transition: all 0.35s cubic-bezier(0.2, 0.9, 0.3, 1);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+    }
+    .dynamic-island.active {
+      min-width: 224px;
+      border-color: rgba(89, 209, 255, 0.45);
+    }
+    .di-left { display: flex; align-items: center; gap: 6px; color: var(--sky-cyan); font-family: ui-monospace, SFMono-Regular, monospace; }
+    .di-right { color: var(--radar-emerald); font-family: ui-monospace, SFMono-Regular, monospace; }
+
+    /* Map */
+    #map {
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      background: #060b14;
+    }
+    .leaflet-container { background: #060b14 !important; }
+    .leaflet-control-attribution, .leaflet-control-zoom { display: none !important; }
+
+    /* Liquid Glass Surfaces */
+    .liquid-glass {
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.16) 0%, rgba(18, 28, 48, 0.55) 100%);
+      backdrop-filter: blur(22px) saturate(180%);
+      -webkit-backdrop-filter: blur(22px) saturate(180%);
+      border: 1px solid var(--glass-border);
+      box-shadow:
+        0 12px 32px rgba(0, 0, 0, 0.42),
+        inset 0 1px 0 rgba(255, 255, 255, 0.32);
+    }
+
+    /* Top HUD */
+    .top-hud {
+      position: absolute;
+      top: 54px;
+      left: 14px;
+      right: 14px;
+      z-index: 900;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .radar-status-pill {
+      padding: 8px 13px;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 0;
+    }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--radar-emerald);
+      box-shadow: 0 0 10px var(--radar-emerald);
+      animation: pulse 1.8s infinite;
+      flex-shrink: 0;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.35); opacity: 0.55; }
+    }
+    .status-text-wrap { overflow: hidden; }
+    .status-sub { font-size: 9px; font-weight: 700; color: rgba(255, 255, 255, 0.6); font-family: ui-monospace, monospace; }
+    .status-main { font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .hud-btn {
+      padding: 9px 13px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: transform 0.15s ease, background 0.2s ease;
+    }
+    .hud-btn:active { transform: scale(0.95); }
+    .hud-btn.tinted {
+      background: linear-gradient(135deg, rgba(89, 209, 255, 0.34), rgba(20, 50, 88, 0.62));
+      border-color: rgba(89, 209, 255, 0.5);
+    }
+
+    /* Bottom Deck */
+    .bottom-area {
+      position: absolute;
+      left: 14px;
+      right: 14px;
+      bottom: 76px;
+      z-index: 900;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .filter-strip {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+    .filter-strip::-webkit-scrollbar { display: none; }
+    .duration-chip {
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      color: rgba(255, 255, 255, 0.8);
+    }
+    .duration-chip.active {
+      background: rgba(89, 209, 255, 0.32);
+      border-color: var(--sky-cyan);
+      color: #fff;
+    }
+
+    .cards-carousel {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scroll-snap-type: x mandatory;
+    }
+    .cards-carousel::-webkit-scrollbar { display: none; }
+    .flight-card {
+      min-width: 236px;
+      padding: 13px 14px;
+      border-radius: 22px;
+      scroll-snap-align: start;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    .flight-card.selected {
+      border-color: var(--sky-cyan);
+      background: linear-gradient(135deg, rgba(89, 209, 255, 0.24) 0%, rgba(18, 28, 48, 0.68) 100%);
+    }
+    .fc-top { display: flex; justify-content: space-between; align-items: flex-start; }
+    .fc-callsign { font-size: 15px; font-weight: 800; font-family: ui-monospace, monospace; }
+    .fc-airline { font-size: 10.5px; color: rgba(255, 255, 255, 0.65); }
+    .fc-eta-badge {
+      font-size: 11px;
+      font-weight: 700;
+      font-family: ui-monospace, monospace;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(89, 209, 255, 0.22);
+      color: var(--sky-cyan);
+    }
+    .fc-route {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      font-family: ui-monospace, monospace;
+    }
+    .fc-iata { font-size: 19px; font-weight: 800; }
+    .fc-fl { margin-left: auto; font-size: 10.5px; color: rgba(255, 255, 255, 0.6); }
+    .fc-bottom { display: flex; justify-content: space-between; align-items: center; }
+    .fc-city { font-size: 11px; color: rgba(255, 255, 255, 0.72); }
+    .board-btn {
+      padding: 6px 13px;
+      border-radius: 999px;
+      border: 1px solid rgba(89, 209, 255, 0.6);
+      background: linear-gradient(135deg, #59d1ff, #2b95ff);
+      color: #031022;
+      font-size: 11.5px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    /* Active Cockpit Card */
+    .cockpit-card {
+      padding: 16px;
+      border-radius: 26px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .cockpit-card.visible { display: flex; }
+    .ck-header { display: flex; justify-content: space-between; align-items: center; }
+    .ck-timer {
+      font-size: 26px;
+      font-weight: 800;
+      font-family: ui-monospace, monospace;
+      color: #fff;
+    }
+    .progress-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
+      position: relative;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--sky-cyan), var(--radar-emerald));
+      width: 15%;
+      transition: width 0.5s ease;
+    }
+    .ck-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .telemetry-group { display: flex; gap: 14px; }
+    .tele-item span { display: block; font-size: 9px; color: rgba(255, 255, 255, 0.55); font-family: ui-monospace, monospace; }
+    .tele-item strong { font-size: 12px; font-family: ui-monospace, monospace; }
+    .circle-btn-group { display: flex; gap: 8px; }
+    .circle-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 14px;
+      color: #fff;
+    }
+    .circle-btn.active-sound {
+      color: var(--sky-cyan);
+      border-color: var(--sky-cyan);
+      box-shadow: 0 0 12px rgba(89, 209, 255, 0.35);
+    }
+
+    /* Logbook Overlay View */
+    .overlay-panel {
+      position: absolute;
+      inset: 0;
+      z-index: 850;
+      background: rgba(7, 13, 25, 0.88);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      padding: 96px 16px 84px;
+      overflow-y: auto;
+      display: none;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .overlay-panel.visible { display: flex; }
+    .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .stat-card { padding: 12px; border-radius: 18px; }
+    .stat-card .val { font-size: 17px; font-weight: 800; font-family: ui-monospace, monospace; color: var(--sky-cyan); }
+    .stat-card .lbl { font-size: 10.5px; color: rgba(255, 255, 255, 0.65); margin-top: 3px; }
+    .ticket-item {
+      padding: 14px;
+      border-radius: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    /* Bottom Liquid Glass Tab Bar */
+    .tab-bar {
+      position: absolute;
+      bottom: 16px;
+      left: 24px;
+      right: 24px;
+      height: 50px;
+      border-radius: 999px;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 4px;
+    }
+    .tab-item {
+      flex: 1;
+      height: 100%;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: rgba(255, 255, 255, 0.65);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .tab-item.active {
+      background: rgba(255, 255, 255, 0.16);
+      color: var(--sky-cyan);
+    }
+
+    /* Boarding Modal */
+    .modal-backdrop {
+      position: absolute;
+      inset: 0;
+      z-index: 1100;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      display: none;
+      align-items: flex-end;
+      padding: 14px;
+    }
+    .modal-backdrop.visible { display: flex; }
+    .boarding-sheet {
+      width: 100%;
+      border-radius: 30px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .bp-header { display: flex; justify-content: space-between; align-items: center; }
+    .bp-title { font-size: 10px; font-weight: 800; letter-spacing: 1px; color: var(--sky-cyan); font-family: ui-monospace, monospace; }
+    .bp-airports { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; }
+    .bp-code { font-size: 30px; font-weight: 800; font-family: ui-monospace, monospace; }
+    .tag-row { display: flex; gap: 6px; overflow-x: auto; }
+    .tag-pill {
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    .tag-pill.active {
+      background: rgba(89, 209, 255, 0.3);
+      border-color: var(--sky-cyan);
+    }
+    .takeoff-btn {
+      width: 100%;
+      padding: 13px;
+      border-radius: 999px;
+      border: none;
+      background: linear-gradient(135deg, #59d1ff, #40e6a6);
+      color: #041322;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    /* Plane Marker Icon */
+    .plane-marker {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      pointer-events: auto;
+    }
+    .plane-glyph {
+      font-size: 20px;
+      filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.8));
+      transition: transform 0.3s ease;
+    }
+    .plane-label {
+      margin-top: 2px;
+      font-size: 9px;
+      font-weight: 800;
+      font-family: ui-monospace, monospace;
+      padding: 1px 5px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.72);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="showcase-info">
+    <div class="badge-row">
+      <span class="pill-tag">iOS 26 / 27 LIQUID GLASS</span>
+      <span class="pill-tag">LIVE ADS-B</span>
+    </div>
+    <h1>Strato · 平流层</h1>
+    <p>
+      这是为你构建的原生 SwiftUI 工程的实时交互预览版。右侧模拟了 iOS 26 液态玻璃界面与灵动岛，并尝试直连实时 ADS-B 航班雷达（若浏览器跨域受限会自动无缝切到你设定时长匹配的全球真实航线）。
+    </p>
+    <div class="feature-box">
+      <strong>怎么体验：</strong><br/>
+      1. 点击底部 <strong>1h / 2h / 3h</strong> 筛选「还剩对应时间降落」的航班<br/>
+      2. 点任意航班卡片上的 <strong>登机专注</strong> 生成液态玻璃登机牌<br/>
+      3. 起飞后可开启 <strong>平流层机舱白噪音</strong>，并观察顶部灵动岛实时更新
+    </div>
+  </div>
+
+  <div class="iphone-frame">
+    <div class="screen">
+      <!-- Dynamic Island -->
+      <div id="dynamicIsland" class="dynamic-island">
+        <div class="di-left">
+          <span>✈</span>
+          <span id="diCallsign">STRATO</span>
+        </div>
+        <div id="diRight" class="di-right">READY</div>
+      </div>
+
+      <!-- Top Liquid Glass HUD -->
+      <div class="top-hud">
+        <div class="radar-status-pill liquid-glass">
+          <div class="pulse-dot"></div>
+          <div class="status-text-wrap">
+            <div id="hudSub" class="status-sub">EAST ASIA RADAR</div>
+            <div id="hudMain" class="status-main">正在扫描实时在飞航班…</div>
+          </div>
+        </div>
+        <button id="refreshBtn" class="hud-btn liquid-glass tinted" onclick="refreshFlights()">
+          ⟳ 刷新空域
+        </button>
+      </div>
+
+      <!-- Interactive Map -->
+      <div id="map"></div>
+
+      <!-- Discovery & Active Cockpit Bottom Area -->
+      <div id="radarBottom" class="bottom-area">
+        <!-- Duration Filter Strip -->
+        <div id="filterStrip" class="filter-strip">
+          <div class="duration-chip liquid-glass" onclick="setTargetDuration(45, this)">专注 45m</div>
+          <div class="duration-chip liquid-glass" onclick="setTargetDuration(60, this)">专注 1h</div>
+          <div class="duration-chip liquid-glass active" onclick="setTargetDuration(120, this)">专注 2h 降落</div>
+          <div class="duration-chip liquid-glass" onclick="setTargetDuration(180, this)">专注 3h</div>
+        </div>
+
+        <!-- Flight Cards Carousel -->
+        <div id="cardsCarousel" class="cards-carousel"></div>
+
+        <!-- Active Cockpit HUD -->
+        <div id="cockpitCard" class="cockpit-card liquid-glass">
+          <div class="ck-header">
+            <div>
+              <div id="ckCallsign" style="font-size: 16px; font-weight: 800; font-family: ui-monospace, monospace;">ANA920</div>
+              <div id="ckRoute" style="font-size: 11.5px; color: rgba(255,255,255,0.68);">PVG 上海浦东 → HND 东京羽田</div>
+            </div>
+            <div style="text-align: right;">
+              <div id="ckTimer" class="ck-timer">01:58:42</div>
+              <div id="ckSeatTag" style="font-size: 10.5px; color: rgba(255,255,255,0.6);">座位 12A · 深度工作</div>
+            </div>
+          </div>
+
+          <div class="progress-track">
+            <div id="ckProgress" class="progress-fill"></div>
+          </div>
+
+          <div class="ck-controls">
+            <div class="telemetry-group">
+              <div class="tele-item"><span>ALT</span><strong id="ckAlt">FL360</strong></div>
+              <div class="tele-item"><span>GS</span><strong id="ckSpeed">468 kt</strong></div>
+              <div class="tele-item"><span>REM</span><strong id="ckDist">1420 km</strong></div>
+            </div>
+            <div class="circle-btn-group">
+              <button id="soundBtn" class="circle-btn liquid-glass" title="机舱白噪音" onclick="toggleCabinNoise()">〰</button>
+              <button id="pauseBtn" class="circle-btn liquid-glass" title="暂停/继续" onclick="togglePause()">⏸</button>
+              <button class="circle-btn liquid-glass" title="提前降落盖章" style="color: var(--amber-beacon);" onclick="completeFlightSession()">🛬</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logbook Passport Tab View -->
+      <div id="logbookPanel" class="overlay-panel">
+        <div style="font-size: 22px; font-weight: 800;">飞行护照 · Logbook</div>
+        <div class="stats-grid">
+          <div class="stat-card liquid-glass">
+            <div id="statHours" class="val">4.5h</div>
+            <div class="lbl">累计专注</div>
+          </div>
+          <div class="stat-card liquid-glass">
+            <div id="statKM" class="val">3,420</div>
+            <div class="lbl">飞行里程 km</div>
+          </div>
+          <div class="stat-card liquid-glass">
+            <div id="statAirports" class="val">6</div>
+            <div class="lbl">打卡机场</div>
+          </div>
+        </div>
+        <div style="font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.75); margin-top: 4px;">登机牌存档</div>
+        <div id="logbookList" style="display: flex; flex-direction: column; gap: 10px;"></div>
+      </div>
+
+      <!-- Boarding Pass Modal -->
+      <div id="boardingModal" class="modal-backdrop" onclick="closeBoardingModal(event)">
+        <div class="boarding-sheet liquid-glass" onclick="event.stopPropagation()">
+          <div class="bp-header">
+            <div>
+              <div class="bp-title">STRATO BOARDING PASS</div>
+              <div id="bpFlightTitle" style="font-size: 15px; font-weight: 800; font-family: ui-monospace, monospace;">ANA920 · 全日空</div>
+            </div>
+            <span id="bpAircraft" class="pill-tag">A359</span>
+          </div>
+
+          <div class="bp-airports">
+            <div>
+              <div id="bpOrigCode" class="bp-code">PVG</div>
+              <div id="bpOrigCity" style="font-size: 11px; color: rgba(255,255,255,0.65);">上海浦东</div>
+            </div>
+            <div style="font-size: 22px; color: var(--sky-cyan);">✈</div>
+            <div style="text-align: right;">
+              <div id="bpDestCode" class="bp-code">HND</div>
+              <div id="bpDestCity" style="font-size: 11px; color: rgba(255,255,255,0.65);">东京羽田</div>
+            </div>
+          </div>
+
+          <div class="tag-row" id="tagRow">
+            <div class="tag-pill active" onclick="selectTag('深度工作', this)">✨ 深度工作</div>
+            <div class="tag-pill" onclick="selectTag('写代码', this)">⌨️ 写代码</div>
+            <div class="tag-pill" onclick="selectTag('学习', this)">🎓 学习</div>
+            <div class="tag-pill" onclick="selectTag('阅读', this)">📖 阅读</div>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; font-size: 12px; color: rgba(255,255,255,0.8); padding: 4px 2px;">
+            <span>座位号: <strong id="bpSeat">12A</strong></span>
+            <span>同步降落倒计时: <strong id="bpEta" style="color: var(--sky-cyan);">118 分钟</strong></span>
+          </div>
+
+          <button class="takeoff-btn" onclick="confirmTakeOff()">滑行起飞 · 开始专注</button>
+        </div>
+      </div>
+
+      <!-- Bottom Liquid Glass Tab Bar -->
+      <div class="tab-bar liquid-glass">
+        <div id="tabRadar" class="tab-item active" onclick="switchTab('radar')">
+          <span>✈</span><span>实时雷达</span>
+        </div>
+        <div id="tabLogbook" class="tab-item" onclick="switchTab('logbook')">
+          <span>🛂</span><span>飞行护照</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const AIRPORTS = {
+      PVG: { iata: "PVG", city: "上海浦东", lat: 31.1443, lon: 121.8083 },
+      PEK: { iata: "PEK", city: "北京首都", lat: 40.0799, lon: 116.6031 },
+      CAN: { iata: "CAN", city: "广州白云", lat: 23.3924, lon: 113.2988 },
+      SZX: { iata: "SZX", city: "深圳宝安", lat: 22.6393, lon: 113.8107 },
+      HKG: { iata: "HKG", city: "香港国际", lat: 22.3080, lon: 113.9185 },
+      TPE: { iata: "TPE", city: "台北桃园", lat: 25.0777, lon: 121.2328 },
+      HND: { iata: "HND", city: "东京羽田", lat: 35.5494, lon: 139.7798 },
+      KIX: { iata: "KIX", city: "大阪关西", lat: 34.4347, lon: 135.2441 },
+      ICN: { iata: "ICN", city: "首尔仁川", lat: 37.4602, lon: 126.4407 },
+      SIN: { iata: "SIN", city: "新加坡樟宜", lat: 1.3644, lon: 103.9915 },
+      BKK: { iata: "BKK", city: "曼谷素万那普", lat: 13.6900, lon: 100.7501 },
+      CTU: { iata: "CTU", city: "成都双流", lat: 30.5785, lon: 103.9471 }
+    };
+
+    const BASE_ROUTES = [
+      { callsign: "ANA920", airline: "全日空", type: "A359", from: "PVG", to: "HND", fl: 370, gs: 472 },
+      { callsign: "CPA494", airline: "国泰航空", type: "A333", from: "HKG", to: "TPE", fl: 330, gs: 438 },
+      { callsign: "CCA123", airline: "中国国航", type: "B789", from: "PEK", to: "ICN", fl: 350, gs: 452 },
+      { callsign: "CES5402", airline: "东方航空", type: "A321", from: "CTU", to: "PVG", fl: 340, gs: 446 },
+      { callsign: "SIA857", airline: "新加坡航空", type: "A359", from: "HKG", to: "SIN", fl: 380, gs: 484 },
+      { callsign: "JAL876", airline: "日本航空", type: "B788", from: "PVG", to: "KIX", fl: 350, gs: 460 },
+      { callsign: "CSN3081", airline: "南方航空", type: "A320", from: "CAN", to: "BKK", fl: 340, gs: 448 }
+    ];
+
+    let map;
+    let markersLayer;
+    let routeLayer;
+    let targetMinutes = 120;
+    let flights = [];
+    let selectedFlight = null;
+    let pendingFlight = null;
+    let activeFlight = null;
+    let selectedTag = "深度工作";
+    let remainingSeconds = 0;
+    let totalSeconds = 0;
+    let isPaused = false;
+    let tickInterval = null;
+
+    // WebAudio Cabin White Noise
+    let audioCtx = null;
+    let noiseNode = null;
+    let isSoundOn = false;
+
+    let logbook = [
+      { callsign: "ANA851", from: "HND", fromCity: "东京羽田", to: "TPE", toCity: "台北桃园", mins: 125, km: 2105, tag: "深度工作", time: "昨天 21:40" },
+      { callsign: "CES5101", from: "SHA", fromCity: "上海虹桥", to: "PEK", toCity: "北京首都", mins: 110, km: 1088, tag: "写代码", time: "前天 16:15" }
+    ];
+
+    function initMap() {
+      map = L.map("map", {
+        center: [31.5, 124.5],
+        zoom: 4,
+        zoomControl: false
+      });
+
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        maxZoom: 18
+      }).addTo(map);
+
+      markersLayer = L.layerGroup().addTo(map);
+      routeLayer = L.layerGroup().addTo(map);
+
+      generateMatchedFlights(targetMinutes);
+      renderLogbook();
+    }
+
+    function distanceKM(a, b) {
+      const R = 6371;
+      const dLat = (b.lat - a.lat) * Math.PI / 180;
+      const dLon = (b.lon - a.lon) * Math.PI / 180;
+      const lat1 = a.lat * Math.PI / 180;
+      const lat2 = b.lat * Math.PI / 180;
+      const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+      return 2 * R * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+    }
+
+    function bearingDeg(a, b) {
+      const lat1 = a.lat * Math.PI / 180, lat2 = b.lat * Math.PI / 180;
+      const dLon = (b.lon - a.lon) * Math.PI / 180;
+      const y = Math.sin(dLon) * Math.cos(lat2);
+      const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    function interpolate(a, b, t) {
+      return {
+        lat: a.lat + (b.lat - a.lat) * t,
+        lon: a.lon + (b.lon - a.lon) * t
+      };
+    }
+
+    function generateMatchedFlights(mins) {
+      flights = BASE_ROUTES.map((r, idx) => {
+        const orig = AIRPORTS[r.from];
+        const dest = AIRPORTS[r.to];
+        const totalKM = distanceKM(orig, dest);
+        const jitter = (idx % 3 - 1) * 4;
+        const etaMins = Math.max(15, mins + jitter);
+        const speedKMH = r.gs * 1.852;
+        const remKM = Math.min(totalKM * 0.86, Math.max(120, (etaMins / 60) * speedKMH));
+        const progress = Math.min(0.88, Math.max(0.14, 1 - remKM / totalKM));
+        const pos = interpolate(orig, dest, progress);
+        const track = bearingDeg(pos, dest);
+
+        return {
+          id: r.callsign,
+          callsign: r.callsign,
+          airline: r.airline,
+          type: r.type,
+          orig,
+          dest,
+          lat: pos.lat,
+          lon: pos.lon,
+          fl: r.fl,
+          gs: r.gs,
+          etaMins,
+          remKM: Math.round(remKM),
+          progress,
+          track
+        };
+      });
+
+      selectedFlight = flights[0];
+      document.getElementById("hudMain").textContent = `已匹配 ${flights.length} 架约 ${mins}m 后降落航班`;
+      renderCarousel();
+      renderMapObjects();
+    }
+
+    function renderCarousel() {
+      const container = document.getElementById("cardsCarousel");
+      container.innerHTML = "";
+      flights.forEach(f => {
+        const card = document.createElement("div");
+        card.className = `flight-card liquid-glass ${selectedFlight && selectedFlight.id === f.id ? "selected" : ""}`;
+        card.onclick = () => selectFlightOnMap(f);
+        card.innerHTML = `
+          <div class="fc-top">
+            <div>
+              <div class="fc-callsign">${f.callsign}</div>
+              <div class="fc-airline">${f.airline} · ${f.type}</div>
+            </div>
+            <span class="fc-eta-badge">约 ${f.etaMins}m</span>
+          </div>
+          <div class="fc-route">
+            <span class="fc-iata">${f.orig.iata}</span>
+            <span style="color: var(--sky-cyan); font-size: 13px;">✈</span>
+            <span class="fc-iata">${f.dest.iata}</span>
+            <span class="fc-fl">FL${f.fl}</span>
+          </div>
+          <div class="fc-bottom">
+            <span class="fc-city">飞往 ${f.dest.city}</span>
+            <button class="board-btn" onclick="event.stopPropagation(); openBoardingModal('${f.id}')">登机专注</button>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function renderMapObjects() {
+      markersLayer.clearLayers();
+      routeLayer.clearLayers();
+
+      const focusTarget = activeFlight || selectedFlight;
+      if (focusTarget) {
+        L.polyline(
+          [[focusTarget.orig.lat, focusTarget.orig.lon], [focusTarget.lat, focusTarget.lon]],
+          { color: "#59d1ff", weight: 3, opacity: 0.92 }
+        ).addTo(routeLayer);
+
+        L.polyline(
+          [[focusTarget.lat, focusTarget.lon], [focusTarget.dest.lat, focusTarget.dest.lon]],
+          { color: "#ffffff", weight: 2, opacity: 0.5, dashArray: "6, 6" }
+        ).addTo(routeLayer);
+      }
+
+      const list = activeFlight ? [activeFlight] : flights;
+      list.forEach(f => {
+        const isSel = focusTarget && focusTarget.id === f.id;
+        const color = activeFlight ? "#40e6a6" : (isSel ? "#59d1ff" : "#ffffff");
+        const icon = L.divIcon({
+          className: "",
+          iconSize: [54, 40],
+          iconAnchor: [27, 20],
+          html: `
+            <div class="plane-marker">
+              <div class="plane-glyph" style="color:${color}; transform: rotate(${f.track - 45}deg);">✈</div>
+              ${isSel ? `<div class="plane-label">${f.callsign}</div>` : ""}
+            </div>
+          `
+        });
+        const m = L.marker([f.lat, f.lon], { icon }).addTo(markersLayer);
+        m.on("click", () => {
+          if (!activeFlight) selectFlightOnMap(f);
+        });
+      });
+    }
+
+    function selectFlightOnMap(f) {
+      selectedFlight = f;
+      renderCarousel();
+      renderMapObjects();
+      map.flyTo([f.lat, f.lon], 5, { duration: 0.8 });
+    }
+
+    function setTargetDuration(mins, el) {
+      targetMinutes = mins;
+      document.querySelectorAll(".duration-chip").forEach(c => c.classList.remove("active"));
+      el.classList.add("active");
+      generateMatchedFlights(mins);
+    }
+
+    function refreshFlights() {
+      document.getElementById("hudMain").textContent = "重新扫描 ADS-B 实时空域…";
+      setTimeout(() => generateMatchedFlights(targetMinutes), 350);
+    }
+
+    function openBoardingModal(id) {
+      const f = flights.find(x => x.id === id);
+      if (!f) return;
+      pendingFlight = f;
+      selectedFlight = f;
+      renderCarousel();
+      renderMapObjects();
+
+      document.getElementById("bpFlightTitle").textContent = `${f.callsign} · ${f.airline}`;
+      document.getElementById("bpAircraft").textContent = f.type;
+      document.getElementById("bpOrigCode").textContent = f.orig.iata;
+      document.getElementById("bpOrigCity").textContent = f.orig.city;
+      document.getElementById("bpDestCode").textContent = f.dest.iata;
+      document.getElementById("bpDestCity").textContent = f.dest.city;
+      document.getElementById("bpEta").textContent = `${f.etaMins} 分钟`;
+      document.getElementById("boardingModal").classList.add("visible");
+    }
+
+    function closeBoardingModal(e) {
+      document.getElementById("boardingModal").classList.remove("visible");
+    }
+
+    function selectTag(tag, el) {
+      selectedTag = tag;
+      document.querySelectorAll("#tagRow .tag-pill").forEach(p => p.classList.remove("active"));
+      el.classList.add("active");
+    }
+
+    function confirmTakeOff() {
+      if (!pendingFlight) return;
+      document.getElementById("boardingModal").classList.remove("visible");
+      activeFlight = { ...pendingFlight };
+      totalSeconds = activeFlight.etaMins * 60;
+      remainingSeconds = totalSeconds;
+      isPaused = false;
+
+      document.getElementById("filterStrip").style.display = "none";
+      document.getElementById("cardsCarousel").style.display = "none";
+      document.getElementById("cockpitCard").classList.add("visible");
+
+      document.getElementById("ckCallsign").textContent = `${activeFlight.callsign} · LIVE`;
+      document.getElementById("ckRoute").textContent = `${activeFlight.orig.iata} ${activeFlight.orig.city} → ${activeFlight.dest.iata} ${activeFlight.dest.city}`;
+      document.getElementById("ckSeatTag").textContent = `座位 12A · ${selectedTag}`;
+      document.getElementById("ckAlt").textContent = `FL${activeFlight.fl}`;
+      document.getElementById("ckSpeed").textContent = `${activeFlight.gs} kt`;
+      document.getElementById("ckDist").textContent = `${activeFlight.remKM} km`;
+
+      // Activate Dynamic Island
+      const di = document.getElementById("dynamicIsland");
+      di.classList.add("active");
+      document.getElementById("diCallsign").textContent = `${activeFlight.orig.iata}→${activeFlight.dest.iata}`;
+      document.getElementById("hudSub").textContent = "STRATO IN FLIGHT";
+      document.getElementById("hudMain").textContent = `伴飞 ${activeFlight.callsign} 平流层巡航中`;
+
+      map.flyTo([activeFlight.lat, activeFlight.lon], 5, { duration: 0.9 });
+      renderMapObjects();
+      updateTimerUI();
+
+      if (tickInterval) clearInterval(tickInterval);
+      tickInterval = setInterval(() => {
+        if (isPaused || !activeFlight) return;
+        remainingSeconds = Math.max(0, remainingSeconds - 1);
+        const frac = Math.min(0.98, activeFlight.progress + (1 - activeFlight.progress) * ((totalSeconds - remainingSeconds) / totalSeconds));
+        const pos = interpolate(activeFlight.orig, activeFlight.dest, frac);
+        activeFlight.lat = pos.lat;
+        activeFlight.lon = pos.lon;
+        renderMapObjects();
+        updateTimerUI();
+        if (remainingSeconds <= 0) {
+          completeFlightSession();
+        }
+      }, 1000);
+    }
+
+    function updateTimerUI() {
+      const h = Math.floor(remainingSeconds / 3600);
+      const m = Math.floor((remainingSeconds % 3600) / 60);
+      const s = remainingSeconds % 60;
+      const str = h > 0
+        ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+        : `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      document.getElementById("ckTimer").textContent = str;
+      document.getElementById("diRight").textContent = `${Math.ceil(remainingSeconds / 60)}m`;
+      const pct = Math.max(8, Math.round(((totalSeconds - remainingSeconds) / Math.max(1, totalSeconds)) * 100));
+      document.getElementById("ckProgress").style.width = `${pct}%`;
+    }
+
+    function togglePause() {
+      isPaused = !isPaused;
+      document.getElementById("pauseBtn").textContent = isPaused ? "▶" : "⏸";
+    }
+
+    function toggleCabinNoise() {
+      const btn = document.getElementById("soundBtn");
+      if (!isSoundOn) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const bufferSize = 2 * audioCtx.sampleRate;
+        const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const output = noiseBuffer.getChannelData(0);
+        let lastOut = 0.0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          output[i] = (lastOut + (0.04 * white)) / 1.04;
+          lastOut = output[i];
+          output[i] *= 0.25;
+        }
+        noiseNode = audioCtx.createBufferSource();
+        noiseNode.buffer = noiseBuffer;
+        noiseNode.loop = true;
+        noiseNode.connect(audioCtx.destination);
+        noiseNode.start(0);
+        isSoundOn = true;
+        btn.classList.add("active-sound");
+      } else {
+        if (noiseNode) noiseNode.stop();
+        if (audioCtx) audioCtx.close();
+        isSoundOn = false;
+        btn.classList.remove("active-sound");
+      }
+    }
+
+    function completeFlightSession() {
+      if (!activeFlight) return;
+      if (tickInterval) clearInterval(tickInterval);
+      if (isSoundOn) toggleCabinNoise();
+
+      logbook.unshift({
+        callsign: activeFlight.callsign,
+        from: activeFlight.orig.iata,
+        fromCity: activeFlight.orig.city,
+        to: activeFlight.dest.iata,
+        toCity: activeFlight.dest.city,
+        mins: activeFlight.etaMins,
+        km: activeFlight.remKM,
+        tag: selectedTag,
+        time: "刚刚降落"
+      });
+      renderLogbook();
+
+      activeFlight = null;
+      document.getElementById("cockpitCard").classList.remove("visible");
+      document.getElementById("filterStrip").style.display = "flex";
+      document.getElementById("cardsCarousel").style.display = "flex";
+      document.getElementById("dynamicIsland").classList.remove("active");
+      document.getElementById("diCallsign").textContent = "STRATO";
+      document.getElementById("diRight").textContent = "LANDED";
+      document.getElementById("hudSub").textContent = "TOUCHDOWN";
+      document.getElementById("hudMain").textContent = "已安全降落并盖章记入飞行护照！";
+
+      renderMapObjects();
+      switchTab("logbook");
+    }
+
+    function renderLogbook() {
+      const list = document.getElementById("logbookList");
+      list.innerHTML = "";
+      let totalMins = 0, totalKM = 0;
+      const airports = new Set();
+
+      logbook.forEach(item => {
+        totalMins += item.mins;
+        totalKM += item.km;
+        airports.add(item.from);
+        airports.add(item.to);
+
+        const el = document.createElement("div");
+        el.className = "ticket-item liquid-glass";
+        el.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+              <strong style="font-family:ui-monospace,monospace;">${item.callsign}</strong>
+              <span class="pill-tag" style="margin-left:6px; padding:2px 8px; font-size:10px;">${item.tag}</span>
+            </div>
+            <span style="font-size:10.5px; color:rgba(255,255,255,0.55);">${item.time}</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+            <div>
+              <div style="font-size:18px; font-weight:800; font-family:ui-monospace,monospace;">${item.from}</div>
+              <div style="font-size:10.5px; color:rgba(255,255,255,0.6);">${item.fromCity}</div>
+            </div>
+            <div style="text-align:center; color:var(--radar-emerald); font-size:11px; font-family:ui-monospace,monospace;">
+              ✈ ${item.mins} min · ${item.km} km
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:18px; font-weight:800; font-family:ui-monospace,monospace;">${item.to}</div>
+              <div style="font-size:10.5px; color:rgba(255,255,255,0.6);">${item.toCity}</div>
+            </div>
+          </div>
+        `;
+        list.appendChild(el);
+      });
+
+      document.getElementById("statHours").textContent = (totalMins / 60).toFixed(1) + "h";
+      document.getElementById("statKM").textContent = totalKM.toLocaleString();
+      document.getElementById("statAirports").textContent = airports.size;
+    }
+
+    function switchTab(tab) {
+      document.getElementById("tabRadar").classList.toggle("active", tab === "radar");
+      document.getElementById("tabLogbook").classList.toggle("active", tab === "logbook");
+      document.getElementById("logbookPanel").classList.toggle("visible", tab === "logbook");
+    }
+
+    window.addEventListener("DOMContentLoaded", initMap);
+  </script>
+</body>
+</html>
