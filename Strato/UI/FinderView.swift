@@ -160,6 +160,7 @@ struct FinderView: View {
                 }
                 .padding(16)
                 .glassCard(cornerRadius: 18)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("pick-destination")
