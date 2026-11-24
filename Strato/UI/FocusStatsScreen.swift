@@ -325,13 +325,14 @@ struct StatsScreen: View {
         return VStack(alignment: .leading, spacing: 12) {
             SectionTitle(text: "开始专注的时间", trailing: best.map { "\($0):00 最多" })
             Chart(Array(stats.startHourlySeconds.enumerated()), id: \.offset) { item in
-                BarMark(x: .value("小时", item.offset), y: .value("分钟", Double(item.element) / 60), width: .ratio(0.65))
+                BarMark(x: .value("小时", String(item.offset)), y: .value("分钟", Double(item.element) / 60), width: .ratio(0.65))
                     .foregroundStyle(item.offset == best ? Palette.amber : Palette.mint.opacity(0.65))
                     .cornerRadius(3)
             }
+            .chartXScale(domain: (0..<24).map { String($0) })
             .chartXAxis {
-                AxisMarks(values: [0, 6, 12, 18, 23]) { value in
-                    AxisValueLabel { if let hour = value.as(Int.self) { Text("\(hour)时") } }
+                AxisMarks(values: ["0", "6", "12", "18"]) { value in
+                    AxisValueLabel { if let hour = value.as(String.self) { Text("\(hour)时") } }
                 }
             }
             .chartYAxis(.hidden)

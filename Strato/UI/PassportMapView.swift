@@ -180,13 +180,20 @@ private struct PassportGlobe: View {
         .onTapGesture(count: 2, perform: reset)
         .onChange(of: footprint.signature) { _, _ in reset() }
         .overlay(alignment: .topTrailing) {
-            Button(action: reset) { Image(systemName: "arrow.counterclockwise").font(.caption.weight(.semibold)).padding(10) }
+            Button(action: reset) {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
                 .buttonStyle(.plain).foregroundStyle(.white.opacity(0.6))
                 .accessibilityLabel("复位地球")
                 .accessibilityIdentifier("passport-globe-reset")
+                .accessibilityValue(viewpoint)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("可旋转的离线三维地球，\(footprint.totalRoutes) 条真实航线")
+        .accessibilityValue(viewpoint)
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: longitude = Geo.normalizeLon(longitude + 30)
@@ -194,6 +201,10 @@ private struct PassportGlobe: View {
             @unknown default: break
             }
         }
+    }
+
+    private var viewpoint: String {
+        String(format: "经度 %.1f 度，纬度 %.1f 度", longitude, latitude)
     }
 
     private func reset() {

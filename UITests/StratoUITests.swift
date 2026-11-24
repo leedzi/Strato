@@ -270,12 +270,23 @@ final class StratoUITests: XCTestCase {
             self.element("passport-map-globe").isSelected && self.element("passport-map-canvas-globe").exists
         }
         let globe = visible("passport-map-canvas-globe")
+        let reset = visible("passport-globe-reset")
+        let initialViewpoint = reset.value as? String ?? ""
+        XCTAssertFalse(initialViewpoint.isEmpty, "globe did not expose its viewpoint")
+        shot("72b-passport-globe-initial")
         let start = globe.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.55))
         let end = globe.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.55))
         start.press(forDuration: 0.1, thenDragTo: end)
+        waitForState("globe did not rotate after dragging") {
+            guard let viewpoint = reset.value as? String else { return false }
+            return !viewpoint.isEmpty && viewpoint != initialViewpoint
+        }
         XCTAssertTrue(element("passport-globe-reset").isHittable, "globe reset was lost after rotation")
         shot("73-passport-globe-rotated")
-        tap("passport-globe-reset")
+        reset.tap()
+        waitForState("globe did not return to its initial viewpoint") {
+            reset.value as? String == initialViewpoint
+        }
         XCTAssertTrue(element("passport-map-globe").isSelected)
         XCTAssertTrue(element("passport-map-canvas-globe").exists)
         shot("74-passport-globe-reset")
