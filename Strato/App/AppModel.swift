@@ -45,6 +45,8 @@ final class AppModel {
 
     let reference: ReferenceData
     let isDemo: Bool
+    /// Set by UI tests: system permission prompts would block them.
+    @ObservationIgnored private let quiet = UserDefaults.standard.bool(forKey: "uitest")
     @ObservationIgnored let demo: DemoWorld?
     @ObservationIgnored let clock: @Sendable () -> Date
     @ObservationIgnored let adsb: ADSBClient
@@ -119,7 +121,7 @@ final class AppModel {
             self.isDemo = true
             self.clock = { world.now() }
             self.adsb = ADSBClient(http: fetcher, clock: { world.now() }, minInterval: 0.02)
-            self.opensky = OpenSkyClient(http: fetcher)
+            self.opensky = OpenSkyClient(http: fetcher, clock: { world.now() }, minimumCount: 1)
             self.routes = RouteResolver(http: fetcher, reference: reference)
             self.photos = PhotoService(http: fetcher)
             Storage.folderName = "StratoDemo"
@@ -136,6 +138,12 @@ final class AppModel {
         }
 
         var loaded = Storage.load(AppSettings.self, from: Storage.File.settings) ?? AppSettings()
+        // `-startLat` / `-startLon` open the radar somewhere specific (used by the live smoke test).
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "startLat") != nil, defaults.object(forKey: "startLon") != nil {
+            loaded.lastLat = defaults.double(forKey: "startLat")
+            loaded.lastLon = defaults.double(forKey: "startLon")
+        }
         if isDemo {
             loaded.hasOnboarded = true
             loaded.notifications = false
@@ -430,10 +438,14 @@ final class AppModel {
 
     // MARK: Finder
 
+    /// Busy airspace swept when the worldwide snapshot is unavailable. Each sweep covers a 460 km radius.
     private static let hubs: [GeoPoint] = [
-        GeoPoint(31.2, 121.5), GeoPoint(39.9, 116.4), GeoPoint(23.1, 113.3), GeoPoint(35.6, 139.8),
-        GeoPoint(1.4, 103.9), GeoPoint(25.3, 55.4), GeoPoint(50.0, 8.6), GeoPoint(51.5, -0.5),
-        GeoPoint(40.6, -73.8), GeoPoint(34.0, -118.4)
+        GeoPoint(31.2, 121.5), GeoPoint(39.9, 116.4), GeoPoint(23.1, 113.3), GeoPoint(30.6, 104.0),
+        GeoPoint(35.6, 139.8), GeoPoint(37.5, 126.5), GeoPoint(1.4, 103.9), GeoPoint(13.7, 100.7),
+        GeoPoint(28.6, 77.1), GeoPoint(25.3, 55.4), GeoPoint(41.3, 28.7), GeoPoint(50.0, 8.6),
+        GeoPoint(51.5, -0.5), GeoPoint(49.0, 2.5), GeoPoint(40.5, -3.6), GeoPoint(40.6, -73.8),
+        GeoPoint(42.0, -87.9), GeoPoint(33.6, -84.4), GeoPoint(32.9, -97.0), GeoPoint(34.0, -118.4),
+        GeoPoint(-33.9, 151.2)
     ]
 
     func findFlights() {
@@ -788,12 +800,14 @@ final class AppModel {
         lastPublishedEnd = nil
         lastPublishedPhase = nil
         announcement = nil
+        // The radar reopens where the user left it, not on the flight that just ended.
+        mapCommand = nil
     }
 
     // MARK: Notifications, Live Activity, widgets
 
     func enableNotifications() {
-        guard !isDemo else { return }
+        guard !isDemo, !quiet else { return }
         Task { [weak self] in
             let granted = await Notifier.requestAuthorization()
             guard let self else { return }
@@ -835,8 +849,9 @@ final class AppModel {
         return StratoFlightAttributes.ContentState(
             plannedEnd: end,
             routeStart: routeStart,
-            isPaused: s.isPaused,
-            pausedRemaining: s.isPaused ? s.remainingSeconds(at: now) : nil,
+            // Only a fixed timer stops when paused; a landing countdown keeps running.
+            isPaused: s.isPaused && s.timerMinutes != nil,
+            pausedRemaining: s.isPaused && s.timerMinutes != nil ? s.remainingSeconds(at: now) : nil,
             phaseTitle: landed ? "已落地" : s.phase.title,
             altitudeFt: s.flight.state.altitudeFt ?? 0,
             groundSpeedKt: Int(s.flight.state.groundSpeedKt ?? 0),

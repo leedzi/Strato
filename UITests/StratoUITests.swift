@@ -80,16 +80,18 @@ final class StratoUITests: XCTestCase {
         sleep(3)
         XCTAssertNotEqual(before, countdown.label, "countdown is not running")
 
-        // Pause freezes the countdown; resume restarts it.
+        // Pausing stops the focus clock (the aircraft, and so the landing countdown, carries on).
+        let focused = app.staticTexts["focused-time"].firstMatch
+        XCTAssertTrue(focused.waitForExistence(timeout: 5))
         tap("pause-button")
         sleep(1)
-        let paused = countdown.label
+        let paused = focused.label
         sleep(3)
-        XCTAssertEqual(paused, countdown.label, "countdown kept running while paused")
+        XCTAssertEqual(paused, focused.label, "focus time kept running while paused")
         shot("06-paused")
         tap("pause-button")
         sleep(3)
-        XCTAssertNotEqual(paused, countdown.label, "countdown did not resume")
+        XCTAssertNotEqual(paused, focused.label, "focus time did not resume")
 
         // Boarding pass overlay.
         tap("show-pass")
@@ -178,6 +180,43 @@ final class StratoUITests: XCTestCase {
 
         openTab("护照")
         XCTAssertTrue(exists("record-MU2315", timeout: 10), "landed flight is not in the logbook")
+    }
+
+    /// The same flow against the real feeds, over busy airspace. Skipped, not failed, when the
+    /// network or the feeds are unavailable, since that says nothing about the app.
+    func testLiveSmoke() throws {
+        app.launchArguments = ["-uitest", "1", "-startLat", "50.0", "-startLon", "8.6", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launch()
+        XCTAssertTrue(exists("open-finder", timeout: 40))
+        let anyPlane = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'plane-'")).firstMatch
+        guard anyPlane.waitForExistence(timeout: 45) else {
+            shot("40-live-no-data")
+            throw XCTSkip("no live aircraft received")
+        }
+        sleep(8)
+        shot("40-live-radar")
+
+        tap("quick-45")
+        let match = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'match-'")).firstMatch
+        guard match.waitForExistence(timeout: 150) else {
+            shot("41-live-no-match")
+            throw XCTSkip("no live match found")
+        }
+        sleep(6)
+        shot("41-live-results")
+        match.tap()
+        XCTAssertTrue(exists("start-focus", timeout: 20))
+        sleep(3)
+        shot("42-live-boarding")
+        tap("start-focus")
+        XCTAssertTrue(exists("pause-button", timeout: 20), "flight screen did not appear")
+        sleep(25)
+        shot("43-live-in-flight")
+        tap("end-button")
+        let discard = app.buttons["不保存，直接结束"].firstMatch
+        XCTAssertTrue(discard.waitForExistence(timeout: 10))
+        discard.tap()
+        XCTAssertTrue(exists("open-finder", timeout: 20), "did not return to the radar")
     }
 
     /// The custom-route (simulated) path.

@@ -3,15 +3,23 @@ import UIKit
 
 /// Satellite imagery from third-party tile servers, with automatic failover.
 ///
-/// - Inside mainland China: Gaode (AutoNavi) imagery, which is sharp there and reachable without a proxy.
-/// - Elsewhere: Google imagery; when Google cannot be reached (as in mainland China without a proxy)
-///   it switches to Esri World Imagery and stops trying Google for a while.
+/// One overlay draws the whole screen from a single source, so there is never a seam between
+/// two providers. In "auto" the map view swaps the overlay as the user moves:
+/// - looking at mainland China: Gaode (AutoNavi), sharp there and reachable without a proxy;
+/// - anywhere else: Google, and when Google cannot be reached (as in mainland China without a
+///   proxy) Esri World Imagery, without retrying Google for a while.
 final class SatelliteTileOverlay: MKTileOverlay {
     enum Source: String {
         case gaode, google, esri
     }
 
+    /// Which part of the world the map is looking at.
+    enum Zone {
+        case china, world
+    }
+
     let provider: MapProvider
+    let zone: Zone
 
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -59,8 +67,9 @@ final class SatelliteTileOverlay: MKTileOverlay {
 
     private static let health = Health()
 
-    init(provider: MapProvider) {
+    init(provider: MapProvider, zone: Zone) {
         self.provider = provider
+        self.zone = zone
         super.init(urlTemplate: nil)
         canReplaceMapContent = true
         tileSize = CGSize(width: 256, height: 256)
@@ -68,30 +77,20 @@ final class SatelliteTileOverlay: MKTileOverlay {
         maximumZ = 18
     }
 
-    /// Whether this overlay draws China in GCJ-02 coordinates (so markers must be shifted to match).
-    var usesGCJInChina: Bool { provider == .auto || provider == .gaode }
-
-    static func tileCenter(_ path: MKTileOverlayPath) -> GeoPoint {
-        let n = pow(2.0, Double(path.z))
-        let lon = (Double(path.x) + 0.5) / n * 360 - 180
-        let lat = atan(sinh(.pi * (1 - 2 * (Double(path.y) + 0.5) / n))) * 180 / .pi
-        return GeoPoint(lat, lon)
+    /// The source this overlay prefers; the others are fallbacks.
+    var primary: Source {
+        switch provider {
+        case .gaode: return .gaode
+        case .google: return .google
+        default: return zone == .china ? .gaode : .google
+        }
     }
 
-    /// Sources to try for a tile, in order.
-    func sources(for path: MKTileOverlayPath) -> [Source] {
-        let inChina = ChinaRegion.contains(Self.tileCenter(path))
-        switch provider {
-        case .google:
-            return [.google, .esri]
-        case .gaode:
-            // Gaode has no detailed imagery abroad; Esri covers the rest of the world without a proxy.
-            return inChina && path.z >= 5 ? [.gaode, .esri] : [.esri, .google]
-        default:
-            // Below zoom 5 a tile spans countries; one source keeps the colours consistent.
-            if path.z < 5 { return [.google, .esri] }
-            return inChina ? [.gaode, .esri] : [.google, .esri]
-        }
+    /// Gaode draws China in GCJ-02 coordinates, so markers there must be shifted to match.
+    var usesGCJInChina: Bool { primary == .gaode }
+
+    private var order: [Source] {
+        primary == .gaode ? [.gaode, .esri] : [.google, .esri]
     }
 
     static func url(_ source: Source, _ path: MKTileOverlayPath) -> URL? {
@@ -108,14 +107,14 @@ final class SatelliteTileOverlay: MKTileOverlay {
     }
 
     override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
-        var order = sources(for: path)
-        let healthy = order.filter { !Self.health.isDown($0) }
-        if !healthy.isEmpty { order = healthy }
-        attempt(order, path, result)
+        var sources = order
+        let healthy = sources.filter { !Self.health.isDown($0) }
+        if !healthy.isEmpty { sources = healthy }
+        attempt(sources, path, result)
     }
 
-    private func attempt(_ order: [Source], _ path: MKTileOverlayPath, _ result: @escaping (Data?, Error?) -> Void) {
-        guard let source = order.first, let url = Self.url(source, path) else {
+    private func attempt(_ sources: [Source], _ path: MKTileOverlayPath, _ result: @escaping (Data?, Error?) -> Void) {
+        guard let source = sources.first, let url = Self.url(source, path) else {
             result(nil, URLError(.cannotLoadFromNetwork))
             return
         }
@@ -132,12 +131,12 @@ final class SatelliteTileOverlay: MKTileOverlay {
                 result(nil, error)
                 return
             }
-            self.attempt(Array(order.dropFirst()), path, result)
+            self.attempt(Array(sources.dropFirst()), path, result)
         }.resume()
     }
 }
 
-/// Place names over the imagery: Gaode's label layer inside China (Chinese names, GCJ-02 like its imagery).
+/// Chinese place names and main roads over Gaode imagery (Gaode serves them as a separate layer).
 final class LabelTileOverlay: MKTileOverlay {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -151,13 +150,12 @@ final class LabelTileOverlay: MKTileOverlay {
         super.init(urlTemplate: nil)
         canReplaceMapContent = false
         tileSize = CGSize(width: 256, height: 256)
-        minimumZ = 5
+        minimumZ = 3
         maximumZ = 18
     }
 
     override func loadTile(at path: MKTileOverlayPath, result: @escaping (Data?, Error?) -> Void) {
-        guard ChinaRegion.contains(SatelliteTileOverlay.tileCenter(path)),
-              let url = URL(string: "https://webst0\((path.x + path.y) % 4 + 1).is.autonavi.com/appmaptile?style=8&x=\(path.x)&y=\(path.y)&z=\(path.z)") else {
+        guard let url = URL(string: "https://webst0\((path.x + path.y) % 4 + 1).is.autonavi.com/appmaptile?style=8&x=\(path.x)&y=\(path.y)&z=\(path.z)") else {
             result(Self.emptyTile, nil)
             return
         }

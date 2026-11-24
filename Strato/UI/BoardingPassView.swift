@@ -126,6 +126,7 @@ struct BoardingPassView: View {
         VStack(spacing: 0) {
             header
             main
+                .overlay(alignment: .top) { stampView.padding(.top, 4) }
                 .background(GeometryReader { geo in
                     Color.clear.preference(key: StubKey.self, value: geo.frame(in: .named("pass")).maxY)
                 })
@@ -136,7 +137,6 @@ struct BoardingPassView: View {
         .onPreferenceChange(StubKey.self) { stubTop = $0 }
         .background(Palette.paper)
         .clipShape(PassShape(notchY: stubTop))
-        .overlay(alignment: .bottomTrailing) { stampView.padding(.trailing, 26).padding(.bottom, 92) }
         .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
         .environment(\.colorScheme, .light)
         .accessibilityElement(children: .combine)
@@ -189,6 +189,8 @@ struct BoardingPassView: View {
                         .foregroundStyle(Palette.ink)
                 }
                 .padding(.top, 10)
+                // On a used pass the stamp takes this spot (the flight number is printed below anyway).
+                .opacity(pass.stamp == .none ? 1 : 0)
                 Spacer(minLength: 4)
                 endpoint(code: pass.destination.code, city: pass.destination.city, alignment: .trailing)
             }
@@ -317,8 +319,8 @@ struct InkStamp: View {
             }
             .foregroundStyle(color)
         }
-        .frame(width: 96, height: 96)
-        .opacity(0.86)
+        .frame(width: 92, height: 92)
+        .opacity(0.9)
         .allowsHitTesting(false)
     }
 }

@@ -234,6 +234,7 @@ struct FlightMapView: UIViewRepresentable {
         private var planes: [String: PlaneAnnotation] = [:]
         private var airports: [AirportAnnotation] = []
         private var appliedProvider: MapProvider?
+        private var appliedZone: SatelliteTileOverlay.Zone?
         private var tiles: SatelliteTileOverlay?
         private var labels: LabelTileOverlay?
         private var routeOverlays: [MKOverlay] = []
@@ -286,38 +287,54 @@ struct FlightMapView: UIViewRepresentable {
             applyCommand(map)
         }
 
+        /// Which imagery the current view calls for: Gaode while looking at mainland China, global otherwise.
+        private func desiredZone(_ map: MKMapView) -> SatelliteTileOverlay.Zone {
+            let c = map.centerCoordinate
+            guard CLLocationCoordinate2DIsValid(c) else { return .world }
+            let spanKm = map.region.span.latitudeDelta * 111
+            return ChinaRegion.contains(GeoPoint(c.latitude, c.longitude)) && spanKm < 5200 ? .china : .world
+        }
+
         private func applyProvider(_ map: MKMapView) {
-            guard appliedProvider != parent.provider else { return }
+            let zone: SatelliteTileOverlay.Zone = parent.provider.usesTiles ? desiredZone(map) : .world
+            guard appliedProvider != parent.provider || appliedZone != zone else { return }
+            let providerChanged = appliedProvider != parent.provider
             appliedProvider = parent.provider
-            map.removeOverlays(map.overlays)
+            appliedZone = zone
+            if let tiles { map.removeOverlay(tiles) }
+            if let labels { map.removeOverlay(labels) }
             tiles = nil
             labels = nil
-            routeKey = ""
-            routeOverlays = []
+            let wasGCJ = gcj
             gcj = false
-            switch parent.provider {
-            case .apple3D:
-                map.preferredConfiguration = MKHybridMapConfiguration(elevationStyle: .realistic)
-            case .appleDark:
-                let config = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
-                config.pointOfInterestFilter = .excludingAll
-                map.preferredConfiguration = config
-            default:
-                let config = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
-                config.pointOfInterestFilter = .excludingAll
-                map.preferredConfiguration = config
-                let overlay = SatelliteTileOverlay(provider: parent.provider)
-                map.addOverlay(overlay, level: .aboveLabels)
+            if providerChanged {
+                if parent.provider == .apple3D {
+                    map.preferredConfiguration = MKHybridMapConfiguration(elevationStyle: .realistic)
+                } else {
+                    let config = MKStandardMapConfiguration(elevationStyle: .flat, emphasisStyle: .muted)
+                    config.pointOfInterestFilter = .excludingAll
+                    map.preferredConfiguration = config
+                }
+            }
+            if parent.provider.usesTiles {
+                // Imagery goes underneath everything else that is drawn on the map.
+                let overlay = SatelliteTileOverlay(provider: parent.provider, zone: zone)
+                map.insertOverlay(overlay, at: 0, level: .aboveLabels)
                 tiles = overlay
                 gcj = overlay.usesGCJInChina
-                if gcj {
+                if overlay.primary == .gaode {
                     let l = LabelTileOverlay()
-                    map.addOverlay(l, level: .aboveLabels)
+                    map.insertOverlay(l, at: 1, level: .aboveLabels)
                     labels = l
                 }
             }
-            // Markers were placed for the previous coordinate system.
-            for a in planes.values { a.coordinate = display(livePoint(a.flight)) }
+            if gcj != wasGCJ {
+                // Everything already placed was positioned for the other coordinate system.
+                for a in planes.values { a.coordinate = display(livePoint(a.flight)) }
+                map.removeAnnotations(airports)
+                airports = []
+                routeKey = ""
+            }
         }
 
         private func syncPlanes(_ map: MKMapView) {
@@ -346,7 +363,7 @@ struct FlightMapView: UIViewRepresentable {
 
         private func syncRoute(_ map: MKMapView, force: Bool) {
             guard let id = parent.focusID, let plane = planes[id], let route = parent.route else {
-                if !routeKey.isEmpty {
+                if !routeKey.isEmpty || !routeOverlays.isEmpty {
                     map.removeOverlays(routeOverlays)
                     map.removeAnnotations(airports)
                     routeOverlays = []
@@ -449,7 +466,9 @@ struct FlightMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let tile = overlay as? MKTileOverlay {
-                return MKTileOverlayRenderer(tileOverlay: tile)
+                let r = MKTileOverlayRenderer(tileOverlay: tile)
+                if tile is LabelTileOverlay { r.alpha = 0.85 }
+                return r
             }
             if let line = overlay as? MKPolyline, line === flownOverlay {
                 let r = MKPolylineRenderer(polyline: line)
@@ -500,6 +519,8 @@ struct FlightMapView: UIViewRepresentable {
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             let byUser = userIsMoving
             userIsMoving = false
+            applyProvider(mapView)
+            syncRoute(mapView, force: false)
             let heading = mapView.camera.heading
             for a in planes.values {
                 (mapView.view(for: a) as? PlaneView)?.apply(a, mapHeading: heading)

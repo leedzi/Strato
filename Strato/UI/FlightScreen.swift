@@ -136,6 +136,17 @@ struct FlightScreen: View {
                         .font(.system(size: 50, weight: .bold, design: .rounded).monospacedDigit())
                         .contentTransition(.numericText(countsDown: true))
                         .accessibilityIdentifier("countdown")
+                    HStack(spacing: 5) {
+                        Text("已专注 \(Fmt.countdown(s.focusSeconds(at: now)))")
+                            .accessibilityIdentifier("focused-time")
+                        if s.isPaused {
+                            // A real flight does not wait: the landing countdown carries on.
+                            Text(s.followsLanding ? "· 暂停中，飞机还在飞" : "· 暂停中")
+                                .foregroundStyle(Palette.amber)
+                        }
+                    }
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 3) {

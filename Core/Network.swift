@@ -235,9 +235,14 @@ actor OpenSkyClient {
     private var blockedUntil: Date?
     private var inFlight: Task<[AircraftState]?, Never>?
     private(set) var health = SourceHealth()
+    private let clock: @Sendable () -> Date
+    private let minimumCount: Int
 
-    init(http: HTTPFetching) {
+    /// A real snapshot holds thousands of aircraft; fewer than `minimumCount` means a degraded answer.
+    init(http: HTTPFetching, clock: @escaping @Sendable () -> Date = { Date() }, minimumCount: Int = 200) {
         self.http = http
+        self.clock = clock
+        self.minimumCount = minimumCount
     }
 
     var snapshotAge: TimeInterval? { cachedAt.map { Date().timeIntervalSince($0) } }
@@ -249,14 +254,14 @@ actor OpenSkyClient {
             return cached.isEmpty ? nil : cached
         }
         if let running = inFlight { return await running.value }
-        let task = Task<[AircraftState]?, Never> { [http] in
+        let task = Task<[AircraftState]?, Never> { [http, clock] in
             guard let url = URL(string: "https://opensky-network.org/api/states/all?extended=1") else { return nil }
             do {
                 let result = try await http.get(url, timeout: 40)
                 guard result.status == 200 else {
                     return result.status == 429 ? [] : nil
                 }
-                return Feeds.decodeOpenSky(result.data, fetchedAt: Date())
+                return Feeds.decodeOpenSky(result.data, fetchedAt: clock())
             } catch {
                 return nil
             }
@@ -265,7 +270,7 @@ actor OpenSkyClient {
         let started = Date()
         let fresh = await task.value
         inFlight = nil
-        if let fresh, fresh.count > 200 {
+        if let fresh, fresh.count >= minimumCount {
             cached = fresh
             cachedAt = Date()
             health.lastSuccess = Date()
