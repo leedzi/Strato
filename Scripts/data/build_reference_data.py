@@ -1068,6 +1068,9 @@ def build_airports(fetcher: Fetcher, simp: Simplifier) -> list[dict]:
             result = city
         else:
             result = short if len(short) <= 10 else ""
+        # Stripping “机场” can leave a Latin-only label; keep the English city fallback.
+        if result and cjk_count(result) == 0:
+            result = ""
         ap["city_zh"] = result
 
     order = {"L": 0, "M": 1, "S": 2}

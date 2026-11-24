@@ -3,7 +3,7 @@ name: Core tests
 on:
   push:
     branches: [ v3 ]
-    paths: [ "Core/**", "Tests/**", "Package.swift", ".github/workflows/core-tests.yml" ]
+    paths: [ "Core/**", "Tests/**", "Package.swift", "Scripts/data/**", "Strato/Resources/Data/**", ".github/workflows/core-tests.yml" ]
   workflow_dispatch:
 
 concurrency:
@@ -19,8 +19,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: swift --version
+      - name: Validate bundled reference data
+        run: python3 -I Scripts/data/build_reference_data.py --validate-only --out Strato/Resources/Data --spot
       - name: Run tests
-        run: swift test 2>&1 | tee test.log
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee test.log
       - name: Summary
         if: always()
         run: |

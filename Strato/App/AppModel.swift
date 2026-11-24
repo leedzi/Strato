@@ -296,11 +296,12 @@ final class AppModel {
 
         let center = radarCenter
         let nm = Int(min(Double(ADSBClient.maxRadiusNM), max(40, radarRadiusKm / Geo.kmPerNM)))
-        guard let list = await adsb.aircraft(near: center, radiusNM: nm) else {
+        let result = await adsb.aircraft(near: center, radiusNM: nm)
+        guard !Task.isCancelled else { return }
+        guard let list = result else {
             if !quiet || flights.isEmpty { radarNote = "实时数据暂时连不上，稍后会自动重试" }
             return
         }
-        if Task.isCancelled { return }
 
         let known = Dictionary(flights.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var merged: [LiveFlight] = []
