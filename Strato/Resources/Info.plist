@@ -30,6 +30,15 @@
     <true/>
     <key>NSSupportsLiveActivities</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.strato.focus</string>
+            <key>CFBundleURLSchemes</key>
+            <array><string>strato</string></array>
+        </dict>
+    </array>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>用来把雷达移到你所在的位置，看看头顶有哪些航班。位置不会离开这台设备。</string>
     <key>UIBackgroundModes</key>

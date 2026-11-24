@@ -28,13 +28,13 @@ enum Notifier {
         return status == .authorized || status == .provisional || status == .ephemeral
     }
 
-    static func scheduleLanding(at date: Date, title: String, body: String) {
+    static func scheduleLanding(at date: Date, title: String, body: String, sound: Bool = true) {
         let interval = date.timeIntervalSinceNow
         guard interval > 2 else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = sound ? .default : nil
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
         // Re-adding with the same identifier replaces the pending request.
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: landingID, content: content, trigger: trigger))

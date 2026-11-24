@@ -37,7 +37,8 @@ jobs:
             -destination "generic/platform=iOS" -derivedDataPath build/dd \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             2>&1 | tee build/device.log | grep -E "error|warning: unused|BUILD|^\*\*" || true
-          test -d build/dd/Build/Products/Release-iphoneos/Strato.app
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build/device.log
+          test -f build/dd/Build/Products/Release-iphoneos/Strato.app/Strato
 
       # Sideloading tools read the entitlements embedded in each binary to know which
       # capabilities (here: the App Group shared with the widget) to provision when re-signing.
@@ -52,12 +53,12 @@ jobs:
       - name: Package
         run: |
           APP=build/dd/Build/Products/Release-iphoneos/Strato.app
-          mkdir -p build/full/Payload build/lc/Payload build/out
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" | grep -qx com.strato.focus
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/PlugIns/StratoWidget.appex/Info.plist" | grep -qx com.strato.focus.widget
+          test "$(find "$APP/PlugIns" -maxdepth 1 -name '*.appex' | wc -l | tr -d ' ')" = 1
+          mkdir -p build/full/Payload build/out
           cp -R "$APP" build/full/Payload/
-          cp -R "$APP" build/lc/Payload/
-          rm -rf build/lc/Payload/Strato.app/PlugIns
           (cd build/full && zip -qry ../out/Strato.ipa Payload)
-          (cd build/lc && zip -qry ../out/Strato-LiveContainer.ipa Payload)
           cp Strato/Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png build/out/icon.png
           ls -lh build/out
 

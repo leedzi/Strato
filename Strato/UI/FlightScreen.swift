@@ -1,11 +1,24 @@
 import SwiftUI
 import UIKit
 
+private enum FlightPerspective: String, CaseIterable {
+    case map
+    case window
+
+    var title: String { self == .map ? "地图" : "舷窗" }
+    var symbol: String { self == .map ? "map.fill" : "rectangle.portrait" }
+    var accessibilityID: String { self == .map ? "flight-view-map" : "flight-view-window" }
+}
+
 /// The screen shown while a focus session is running.
 struct FlightScreen: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showPass = false
     @State private var confirmEnd = false
+    @State private var perspective = FlightPerspective.map
+    @State private var googleAccess = GoogleSceneAccess.shared
+    @State private var showGoogle3D = false
 
     var body: some View {
         if let session = model.session {
@@ -15,53 +28,33 @@ struct FlightScreen: View {
 
     private func content(_ s: FocusSession) -> some View {
         let brand = model.brand(for: s.flight)
-        return ZStack {
-            FlightMapView(
-                provider: model.settings.mapProvider,
-                initialCenter: s.flight.state.point,
-                initialRadiusKm: 260,
-                flights: [s.flight],
-                focusID: s.flight.id,
-                route: s.route,
-                trail: s.track.map { $0.point },
-                command: model.mapCommand,
-                follow: true,
-                bottomInset: 380,
-                clock: model.clock
-            )
-            .ignoresSafeArea()
+        return GeometryReader { geometry in
+            let size = geometry.size
+            let wide = size.width > 520 && size.width > size.height * 1.12
+            let sideWidth = min(370, size.width * 0.43)
+            ZStack {
+                flightBackground(s, size: size, wide: wide, sideWidth: sideWidth)
 
-            // Keeps the status bar and the top controls readable over bright imagery.
-            LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 150)
-                .frame(maxHeight: .infinity, alignment: .top)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-
-            VStack(spacing: 10) {
-                topBar(s, brand: brand)
-                if let text = model.announcement {
-                    Label(text, systemImage: "bell.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .glassPill(tint: Palette.amber.opacity(0.35))
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .accessibilityIdentifier("announcement")
+                if perspective == .map {
+                    // Keeps the top controls readable over bright imagery.
+                    LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 150)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
                 }
-                Spacer(minLength: 0)
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    panel(s, brand: brand, now: model.now)
+
+                if wide {
+                    wideLayout(s, brand: brand, sideWidth: sideWidth)
+                } else {
+                    portraitLayout(s, brand: brand, size: size)
+                }
+
+                if showPass {
+                    passOverlay(s)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 6)
-            .padding(.bottom, 8)
             .animation(.smooth(duration: 0.35), value: model.announcement)
-
-            if showPass {
-                passOverlay(s)
-            }
         }
         .foregroundStyle(.white)
         .background(Palette.night)
@@ -74,6 +67,181 @@ struct FlightScreen: View {
         }
         .onAppear { UIApplication.shared.isIdleTimerDisabled = model.settings.keepAwake }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onAppear { googleAccess.refreshConfiguration() }
+        .sheet(isPresented: $showGoogle3D) {
+            GoogleFlightScene()
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    @ViewBuilder
+    private func flightBackground(_ s: FocusSession, size: CGSize, wide: Bool, sideWidth: CGFloat) -> some View {
+        if perspective == .map {
+            FlightMapView(
+                provider: model.settings.mapProvider,
+                initialCenter: s.flight.state.point,
+                initialRadiusKm: 260,
+                flights: [s.flight],
+                focusID: s.flight.id,
+                route: s.route,
+                trail: s.track.map { $0.point },
+                command: model.mapCommand,
+                follow: true,
+                bottomInset: wide ? 24 : 380,
+                clock: model.clock
+            )
+            .frame(width: wide ? max(120, size.width - sideWidth - 42) : size.width)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .ignoresSafeArea()
+        } else {
+            LinearGradient(colors: [Palette.night, Palette.dusk, Palette.night], startPoint: .topLeading, endPoint: .bottomTrailing)
+                .ignoresSafeArea()
+        }
+    }
+
+    private func portraitLayout(_ s: FocusSession, brand: AirlineBrand, size: CGSize) -> some View {
+        VStack(spacing: 10) {
+            topBar(s, brand: brand)
+            viewControls(s)
+            announcement(compact: perspective == .window)
+
+            if size.height < 460 || (perspective == .window && size.height < 610) {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        if perspective == .window {
+                            cabinWindow(s).frame(height: 200)
+                        }
+                        livePanel(s, brand: brand, compact: true)
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .frame(maxHeight: .infinity)
+            } else {
+                if perspective == .window {
+                    cabinWindow(s)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Spacer(minLength: 0)
+                }
+
+                if size.height < 610 {
+                    ScrollView {
+                        livePanel(s, brand: brand, compact: true)
+                    }
+                    .scrollIndicators(.hidden)
+                    .frame(height: max(196, size.height * 0.46))
+                } else {
+                    livePanel(s, brand: brand, compact: perspective == .window)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+    }
+
+    private func wideLayout(_ s: FocusSession, brand: AirlineBrand, sideWidth: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            VStack(spacing: 10) {
+                topBar(s, brand: brand)
+                viewControls(s)
+                announcement(compact: perspective == .window)
+                if perspective == .window {
+                    cabinWindow(s)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            ScrollView {
+                livePanel(s, brand: brand, compact: perspective == .window)
+            }
+            .scrollIndicators(.hidden)
+            .frame(width: sideWidth)
+            .frame(maxHeight: .infinity)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 8)
+    }
+
+    private func viewControls(_ s: FocusSession) -> some View {
+        HStack(spacing: 8) {
+            perspectiveSelector
+            if googleAccess.canOpenScene && GoogleFlightScene.isSupportedLocation(s.position(at: model.now)) {
+                Button { showGoogle3D = true } label: {
+                    Label("3D", systemImage: "globe")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12)
+                        .frame(height: 42)
+                        .glassPill()
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Google 3D 外景")
+                .accessibilityIdentifier("flight-google3d-button")
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var perspectiveSelector: some View {
+        HStack(spacing: 4) {
+            ForEach(FlightPerspective.allCases, id: \.self) { item in
+                let selected = perspective == item
+                Button {
+                    withAnimation(.easeInOut(duration: reduceMotion ? 0 : 0.25)) {
+                        perspective = item
+                    }
+                } label: {
+                    Label(item.title, systemImage: item.symbol)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(selected ? Color.white : Color.white.opacity(0.65))
+                        .padding(.horizontal, 16)
+                        .frame(height: 34)
+                        .background(selected ? Color.white.opacity(0.16) : Color.clear, in: Capsule())
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.title)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .accessibilityIdentifier(item.accessibilityID)
+            }
+        }
+        .padding(4)
+        .glassPill()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("flight-view-selector")
+    }
+
+    @ViewBuilder
+    private func announcement(compact: Bool) -> some View {
+        if let text = model.announcement {
+            Label(text, systemImage: "bell.fill")
+                .font(compact ? .caption.weight(.semibold) : .subheadline.weight(.semibold))
+                .lineLimit(compact ? 2 : 3)
+                .padding(.horizontal, 16)
+                .padding(.vertical, compact ? 8 : 10)
+                .glassPill(tint: Palette.amber.opacity(0.35))
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .accessibilityIdentifier("announcement")
+        }
+    }
+
+    private func cabinWindow(_ s: FocusSession) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let now = model.now
+            CabinWindowView(cabin: s.cabin, state: s.flight.state, position: s.position(at: now), date: now)
+        }
+    }
+
+    private func livePanel(_ s: FocusSession, brand: AirlineBrand, compact: Bool) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            panel(s, brand: brand, now: model.now, compact: compact)
+        }
     }
 
     // MARK: Top bar
@@ -121,19 +289,19 @@ struct FlightScreen: View {
 
     // MARK: Panel
 
-    private func panel(_ s: FocusSession, brand: AirlineBrand, now: Date) -> some View {
+    private func panel(_ s: FocusSession, brand: AirlineBrand, now: Date, compact: Bool) -> some View {
         let progress = s.progress(at: now)
         let state = s.flight.state
         let end = s.plannedEnd(at: now)
         let sky = Solar.sky(at: s.position(at: now), date: now)
-        return VStack(spacing: 14) {
+        return VStack(spacing: compact ? 10 : 14) {
             HStack(alignment: .lastTextBaseline) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(s.followsLanding ? "距落地" : "专注剩余")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Text(Fmt.countdown(s.remainingSeconds(at: now)))
-                        .font(.system(size: 50, weight: .bold, design: .rounded).monospacedDigit())
+                        .font(.system(size: compact ? 36 : 50, weight: .bold, design: .rounded).monospacedDigit())
                         .contentTransition(.numericText(countsDown: true))
                         .accessibilityIdentifier("countdown")
                     HStack(spacing: 5) {
@@ -178,18 +346,20 @@ struct FlightScreen: View {
                 .lineLimit(1)
             }
 
-            HStack(spacing: 8) {
-                Readout(title: "高度", value: FlightMath.flightLevel(state.altitudeFt), detail: Fmt.altitudeMeters(state.altitudeFt))
-                Readout(title: "地速", value: "\(Int(state.groundSpeedKt ?? 0)) kt", detail: Fmt.speedKmh(state.groundSpeedKt))
-                Readout(title: "升降", value: verticalText(state.verticalRateFpm), detail: "英尺/分")
-                Readout(title: "机型", value: state.typeCode ?? "—", detail: state.registration ?? s.seat)
+            if !compact {
+                HStack(spacing: 8) {
+                    Readout(title: "高度", value: FlightMath.flightLevel(state.altitudeFt), detail: Fmt.altitudeMeters(state.altitudeFt))
+                    Readout(title: "地速", value: "\(Int(state.groundSpeedKt ?? 0)) kt", detail: Fmt.speedKmh(state.groundSpeedKt))
+                    Readout(title: "升降", value: verticalText(state.verticalRateFpm), detail: "英尺/分")
+                    Readout(title: "机型", value: state.typeCode ?? "—", detail: state.registration ?? s.seat)
+                }
             }
 
-            window(sky: sky, state: state)
+            window(sky: sky, state: state, compact: compact)
 
             controls(s)
         }
-        .padding(18)
+        .padding(compact ? 14 : 18)
         .glassCard(cornerRadius: 32)
     }
 
@@ -199,13 +369,13 @@ struct FlightScreen: View {
     }
 
     /// A strip in the colours of the sky outside right now, with what the aircraft reports about the air.
-    private func window(sky: Solar.Sky, state: AircraftState) -> some View {
+    private func window(sky: Solar.Sky, state: AircraftState, compact: Bool) -> some View {
         HStack(spacing: 10) {
             Image(systemName: sky.symbol)
-                .font(.system(size: 17))
+                .font(.system(size: compact ? 14 : 17))
                 .symbolRenderingMode(.hierarchical)
             Text("窗外 · \(sky.title)")
-                .font(.footnote.weight(.semibold))
+                .font(compact ? .caption.weight(.semibold) : .footnote.weight(.semibold))
             Spacer()
             if let temp = state.outsideTempC {
                 Text("\(temp)°C").font(.footnote.monospacedDigit())
@@ -216,7 +386,7 @@ struct FlightScreen: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.vertical, compact ? 6 : 9)
         .background(
             LinearGradient(colors: sky.colors, startPoint: .leading, endPoint: .trailing).opacity(0.85),
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -243,6 +413,9 @@ struct FlightScreen: View {
                         Label(preset.title, systemImage: preset.symbol).tag(preset)
                     }
                 }
+                Divider()
+                Toggle("登机与进近提示音", isOn: Binding(get: { model.settings.chimes }, set: { model.settings.chimes = $0 }))
+                    .accessibilityIdentifier("flight-chimes-toggle")
             } label: {
                 Label(model.settings.ambient == .off ? "环境音" : model.settings.ambient.title, systemImage: model.settings.ambient == .off ? "speaker.wave.2.fill" : model.settings.ambient.symbol)
                     .font(.subheadline.weight(.semibold))
@@ -271,21 +444,42 @@ struct FlightScreen: View {
     // MARK: Boarding pass overlay
 
     private func passOverlay(_ s: FocusSession) -> some View {
-        ZStack {
-            Color.black.opacity(0.6)
-                .ignoresSafeArea()
-                .onTapGesture { withAnimation(.smooth(duration: 0.3)) { showPass = false } }
-            VStack(spacing: 16) {
-                BoardingPassView(pass: PassData(session: s, model: model))
-                    .padding(.horizontal, 20)
-                Button("收起") {
-                    withAnimation(.smooth(duration: 0.3)) { showPass = false }
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.6)
+                    .ignoresSafeArea()
+                    .onTapGesture { withAnimation(.smooth(duration: 0.3)) { showPass = false } }
+                if geometry.size.height < 470 {
+                    VStack(spacing: 12) {
+                        ScrollView {
+                            BoardingPassView(pass: PassData(session: s, model: model))
+                                .frame(maxWidth: 540)
+                                .padding(.horizontal, 20)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .scrollIndicators(.hidden)
+                        closePassButton
+                    }
+                    .padding(.vertical, 8)
+                } else {
+                    VStack(spacing: 16) {
+                        BoardingPassView(pass: PassData(session: s, model: model))
+                            .frame(maxWidth: 540)
+                            .padding(.horizontal, 20)
+                        closePassButton
+                    }
                 }
-                .buttonStyle(.glass)
-                .accessibilityIdentifier("hide-pass")
             }
         }
         .transition(.opacity)
         .zIndex(2)
+    }
+
+    private var closePassButton: some View {
+        Button("收起") {
+            withAnimation(.smooth(duration: 0.3)) { showPass = false }
+        }
+        .buttonStyle(.glass)
+        .accessibilityIdentifier("hide-pass")
     }
 }

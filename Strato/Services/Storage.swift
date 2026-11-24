@@ -133,6 +133,9 @@ struct AppSettings: Codable, Equatable, Sendable {
     var useGlobalSnapshot = true
     var keepAwake = false
     var finderMinutes = 60
+    var finderUnlimited = false
+    var lastAirportCode: String?
+    var lastAirportAt: Date?
     var lastLat = 31.2
     var lastLon = 121.5
     var lastRadiusKm = 420.0
@@ -156,6 +159,9 @@ struct AppSettings: Codable, Equatable, Sendable {
         useGlobalSnapshot = value(.useGlobalSnapshot, d.useGlobalSnapshot)
         keepAwake = value(.keepAwake, d.keepAwake)
         finderMinutes = value(.finderMinutes, d.finderMinutes)
+        finderUnlimited = value(.finderUnlimited, d.finderUnlimited)
+        lastAirportCode = value(.lastAirportCode, d.lastAirportCode)
+        lastAirportAt = value(.lastAirportAt, d.lastAirportAt)
         lastLat = value(.lastLat, d.lastLat)
         lastLon = value(.lastLon, d.lastLon)
         lastRadiusKm = value(.lastRadiusKm, d.lastRadiusKm)

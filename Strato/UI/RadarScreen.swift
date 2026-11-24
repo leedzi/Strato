@@ -8,11 +8,13 @@ struct RadarScreen: View {
 
     enum RadarSheet: Identifiable {
         case finder
+        case quickTakeoff
         case boarding(LiveFlight)
 
         var id: String {
             switch self {
             case .finder: return "finder"
+            case .quickTakeoff: return "quick-takeoff"
             case .boarding(let f): return "boarding-\(f.id)"
             }
         }
@@ -77,7 +79,10 @@ struct RadarScreen: View {
             .animation(.smooth(duration: 0.3), value: model.focus?.id)
             .animation(.smooth(duration: 0.3), value: model.radarNote)
         }
-        .onAppear { model.radarAppeared() }
+        .onAppear {
+            model.radarAppeared()
+            if model.quickTakeoffRequest != nil { sheet = .quickTakeoff }
+        }
         .onDisappear { model.radarDisappeared() }
         .sheet(item: $sheet, onDismiss: {
             model.cancelFinder()
@@ -87,6 +92,8 @@ struct RadarScreen: View {
                 switch which {
                 case .finder:
                     FinderView()
+                case .quickTakeoff:
+                    FinderView(startInCustomMode: true)
                 case .boarding(let flight):
                     BoardingView(flight: flight)
                 }
@@ -97,6 +104,9 @@ struct RadarScreen: View {
         }
         .onChange(of: model.session?.id) { _, id in
             if id != nil { sheet = nil }
+        }
+        .onChange(of: model.quickTakeoffRequest?.id) { _, id in
+            if id != nil { sheet = .quickTakeoff }
         }
     }
 
@@ -168,6 +178,29 @@ struct RadarScreen: View {
 
     private var finderDeck: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let airport = model.homeAirport {
+                HStack(spacing: 10) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.title3)
+                        .foregroundStyle(Palette.mint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.settings.lastAirportCode == nil ? "出发机场" : "上次落地")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Text("\(airport.city) · \(airport.code)")
+                            .font(.subheadline.weight(.semibold)).lineLimit(1)
+                            .accessibilityIdentifier("home-airport")
+                    }
+                    Spacer(minLength: 0)
+                    Button { model.requestQuickTakeoff() } label: {
+                        Label("快速起飞", systemImage: "airplane.departure")
+                            .font(.caption.weight(.semibold))
+                            .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("quick-takeoff")
+                }
+                Divider().overlay(.white.opacity(0.08))
+            }
             HStack(alignment: .firstTextBaseline) {
                 Text("想专注多久？").font(.headline)
                 Spacer()
@@ -181,6 +214,7 @@ struct RadarScreen: View {
                     ForEach(quickDurations, id: \.self) { minutes in
                         Button {
                             model.finder.targetMinutes = minutes
+                            model.finder.isUnlimited = false
                             model.finder.destination = nil
                             model.boarding = nil
                             sheet = .finder
@@ -194,6 +228,7 @@ struct RadarScreen: View {
             }
             Button {
                 model.finder.targetMinutes = model.settings.finderMinutes
+                model.finder.isUnlimited = model.settings.finderUnlimited
                 model.boarding = nil
                 sheet = .finder
             } label: {

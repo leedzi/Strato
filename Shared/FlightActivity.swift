@@ -15,6 +15,14 @@ struct StratoFlightAttributes: ActivityAttributes {
         var groundSpeedKt: Int
         /// True once the flight is over; the activity then shows the arrival.
         var landed: Bool
+        /// Optional for activities created by an older app version.
+        var remainingKm: Double? = nil
+        var focusStartedAt: Date? = nil
+        var focusSeconds: TimeInterval? = nil
+        var focusPaused: Bool? = nil
+        var signalLost: Bool? = nil
+        var followsLanding: Bool? = nil
+        var completionTitle: String? = nil
     }
 
     var flightNumber: String

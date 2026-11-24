@@ -3,7 +3,6 @@ name: Core tests
 on:
   push:
     branches: [ v3 ]
-    paths: [ "Core/**", "Tests/**", "Package.swift", "Scripts/data/**", "Strato/Resources/Data/**", ".github/workflows/core-tests.yml" ]
   workflow_dispatch:
 
 concurrency:
@@ -29,3 +28,9 @@ jobs:
         if: always()
         run: |
           grep -E "error:|warning: unre|failed|Executed" test.log | tail -60 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: core-test-log
+          path: test.log
+          retention-days: 14

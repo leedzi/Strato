@@ -34,7 +34,7 @@ enum FlightMath {
         let flown = Geo.distanceKm(origin.point, state.point)
         let remaining = Geo.distanceKm(state.point, destination.point)
 
-        if state.onGround || (state.groundSpeedKt ?? 0) < 60 {
+        if isGrounded(state: state, near: [origin, destination]) {
             // Parked or taxiing: must be at one end of the route.
             return flown < 12 || remaining < 12
         }
@@ -51,12 +51,28 @@ enum FlightMath {
 
     // MARK: Phase
 
+    /// A missing or zero speed alone does not mean an airborne report is a ground report.
+    /// Infer ground only with a known low altitude near a route airport, or an explicit flag.
+    static func isGrounded(state: AircraftState, route: FlightRoute?) -> Bool {
+        isGrounded(state: state, near: route.map { [$0.origin, $0.destination] } ?? [])
+    }
+
+    private static func isGrounded(state: AircraftState, near airports: [Airport]) -> Bool {
+        if state.onGround { return true }
+        guard let altitude = state.altitudeFt,
+              let speed = state.groundSpeedKt, speed.isFinite, speed >= 0, speed < 60 else { return false }
+        if airports.isEmpty { return altitude >= -300 && altitude < 400 }
+        return airports.contains { airport in
+            let above = Double(altitude) - Double(airport.elevationFt ?? 0)
+            return Geo.distanceKm(state.point, airport.point) < 12 && above >= -300 && above < 400
+        }
+    }
+
     static func phase(state: AircraftState, route: FlightRoute?) -> FlightPhase {
         let alt = Double(state.altitudeFt ?? 0)
         let vs = Double(state.verticalRateFpm ?? 0)
-        let gs = state.groundSpeedKt ?? 0
 
-        if state.onGround || (alt < 400 && gs < 70) {
+        if isGrounded(state: state, route: route) {
             if let route, Geo.distanceKm(state.point, route.destination.point) < 12,
                Geo.distanceKm(state.point, route.origin.point) > 12 {
                 return .landed
@@ -116,7 +132,7 @@ enum FlightMath {
     static func secondsToLanding(state: AircraftState, route: FlightRoute) -> TimeInterval {
         let remaining = Geo.distanceKm(state.point, route.destination.point)
 
-        if state.onGround || (state.groundSpeedKt ?? 0) < 60 {
+        if isGrounded(state: state, route: route) {
             if remaining < 12 { return 0 }
             // Still at the gate or taxiing out: taxi + whole flight.
             let airMinutes = enrouteMinutes(km: route.distanceKm, cruiseKt: cruiseSpeedKt(state: state), climbing: true)

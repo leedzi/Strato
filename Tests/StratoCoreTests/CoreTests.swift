@@ -34,6 +34,15 @@ enum Fixtures {
             positionTime: time, source: .adsbfi
         )
     }
+
+    static func nearDestination(_ route: FlightRoute, km: Double, at time: Date = t0, alt: Int = 5675, gs: Double? = 160, vs: Int = -700, hex: String = "abc123") -> AircraftState {
+        let p = Geo.destination(from: route.destination.point, bearing: Geo.bearing(route.destination.point, route.origin.point), distanceKm: km)
+        var state = cruising(route, fraction: 1, at: time, alt: alt, gs: gs ?? 0, vs: vs, hex: hex)
+        state.lat = p.lat
+        state.lon = p.lon
+        state.groundSpeedKt = gs
+        return state
+    }
 }
 
 final class GeoTests: XCTestCase {
@@ -143,6 +152,45 @@ final class FlightMathTests: XCTestCase {
         let half = FlightMath.secondsToLanding(state: Fixtures.cruising(route, fraction: 0.5, gs: 450), route: route) / 60
         XCTAssertGreaterThan(half, 195)
         XCTAssertLessThan(half, 230)
+    }
+
+    func testZeroOrMissingSpeedDoesNotRestartAnAirborneRoute() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        for speed in [nil, 0, 45, 160] as [Double?] {
+            for km in [10.0, 14.0] {
+                let fix = Fixtures.nearDestination(route, km: km, gs: speed)
+                XCTAssertFalse(FlightMath.isGrounded(state: fix, route: route))
+                XCTAssertFalse(FlightMath.hasLanded(state: fix, route: route))
+                XCTAssertTrue(FlightMath.isPlausible(state: fix, origin: route.origin, destination: route.destination))
+                XCTAssertEqual(FlightMath.secondsToLanding(state: fix, route: route), FlightMath.terminalMinutes(forKm: km) * 60, accuracy: 0.01)
+            }
+            var cruise = Fixtures.cruising(route, fraction: 0.5, gs: 440)
+            let airborneEstimate = FlightMath.secondsToLanding(state: cruise, route: route)
+            cruise.groundSpeedKt = speed
+            XCTAssertEqual(FlightMath.secondsToLanding(state: cruise, route: route), airborneEstimate, accuracy: 0.01)
+        }
+    }
+
+    func testMissingAltitudeAndSpeedAreNotGroundEvidence() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        var fix = Fixtures.nearDestination(route, km: 10, gs: nil)
+        fix.altitudeFt = nil
+        XCTAssertFalse(FlightMath.isGrounded(state: fix, route: route))
+        XCTAssertGreaterThan(FlightMath.secondsToLanding(state: fix, route: route), 120)
+    }
+
+    func testGroundDepartureStillIncludesTaxiAndUsesFieldElevation() {
+        let route = Fixtures.route(Fixtures.muc, Fixtures.dus)
+        var parked = Fixtures.cruising(route, fraction: 0, alt: Fixtures.muc.elevationFt! + 30, gs: 0)
+        let departing = Fixtures.cruising(route, fraction: 0, alt: 9000, gs: 250, vs: 1800)
+        let expected = FlightMath.secondsToLanding(state: departing, route: route) + 12 * 60
+        XCTAssertTrue(FlightMath.isGrounded(state: parked, route: route))
+        XCTAssertEqual(FlightMath.phase(state: parked, route: route), .ground)
+        XCTAssertEqual(FlightMath.secondsToLanding(state: parked, route: route), expected, accuracy: 0.01)
+        parked.onGround = true
+        parked.altitudeFt = nil
+        parked.groundSpeedKt = nil
+        XCTAssertEqual(FlightMath.secondsToLanding(state: parked, route: route), expected, accuracy: 0.01)
     }
 
     func testTerminalProfileMatchesObservations() {

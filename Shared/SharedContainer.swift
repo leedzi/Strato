@@ -3,6 +3,32 @@ import WidgetKit
 
 /// What the widgets and the Live Activity need to know, written by the app whenever it changes.
 struct WidgetSnapshot: Codable, Sendable {
+    struct Place: Codable, Sendable, Hashable {
+        var code: String
+        var city: String
+        var lat: Double
+        var lon: Double
+        var point: GeoPoint { GeoPoint(lat, lon) }
+    }
+
+    struct Destination: Codable, Sendable, Hashable, Identifiable {
+        var place: Place
+        var minutes: Int
+        var id: String { place.code }
+    }
+
+    struct Journey: Codable, Sendable, Hashable {
+        var flightNumber: String
+        var origin: Place
+        var destination: Place
+        var endedAt: Date
+        var focusMinutes: Int
+        var distanceKm: Double
+        var completed: Bool
+        var landed: Bool
+        var simulated: Bool
+        var path: [GeoPoint]
+    }
     struct Flight: Codable, Sendable, Hashable {
         var flightNumber: String
         var airlineICAO: String?
@@ -43,6 +69,12 @@ struct WidgetSnapshot: Codable, Sendable {
     }
 
     var flight: Flight?
+    var airport: Place?
+    var airportSince: Date?
+    var destinations: [Destination]?
+    var lastJourney: Journey?
+    /// Saved journey geometry; widgets draw it offline without making map requests.
+    var routes: [[GeoPoint]]?
     var stats = Stats()
     var updatedAt = Date()
 

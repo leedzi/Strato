@@ -2,9 +2,9 @@ import XCTest
 @testable import StratoCore
 
 final class FocusSessionTests: XCTestCase {
-    private func session(fraction: Double = 0.4, timer: Int? = nil, start: Date = Fixtures.t0) -> FocusSession {
+    private func session(fraction: Double = 0.4, timer: Int? = nil, start: Date = Fixtures.t0, fix: AircraftState? = nil) -> FocusSession {
         let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
-        let state = Fixtures.cruising(route, fraction: fraction, at: start)
+        let state = fix ?? Fixtures.cruising(route, fraction: fraction, at: start)
         return FocusSession(
             flight: LiveFlight(state: state, route: route), route: route, tag: .coding,
             seat: "12A", cabin: .business, gate: "G16", sequence: 18, startedAt: start, timerMinutes: timer
@@ -101,6 +101,83 @@ final class FocusSessionTests: XCTestCase {
         var nextLeg = parked
         nextLeg.callsign = "ANA919"
         XCTAssertFalse(s.accepts(nextLeg))
+    }
+
+    func testBackgroundArrivalWithZeroOrMissingSpeedUsesRemainingDistance() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        for speed in [nil, 0, 45] as [Double?] {
+            var s = session(fix: Fixtures.nearDestination(route, km: 10))
+            XCTAssertEqual(s.remainingSeconds(at: Fixtures.t0), 3 * 60, accuracy: 0.01)
+            // A new fix after ten minutes still shows it airborne, now 14 km out at 5,675 ft.
+            let reopened = Fixtures.t0.addingTimeInterval(600)
+            s.apply(fix: Fixtures.nearDestination(route, km: 14, at: reopened, gs: speed), at: reopened)
+            XCTAssertEqual(s.remainingSeconds(at: reopened), FlightMath.terminalMinutes(forKm: 14) * 60, accuracy: 0.01)
+            XCTAssertEqual(s.lastFixAt, reopened)
+            XCTAssertNil(s.completion(at: reopened))
+        }
+    }
+
+    func testCachedFixDoesNotKeepMovingAnOverdueLandingEstimate() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        var s = session(fix: Fixtures.nearDestination(route, km: 14))
+        let eta = s.estimatedLanding
+        let reopened = eta.addingTimeInterval(90)
+        var cached = s.flight.state
+        cached.groundSpeedKt = nil
+        s.apply(fix: cached, at: reopened)
+        XCTAssertEqual(s.estimatedLanding, eta)
+        XCTAssertEqual(s.lastFixAt, Fixtures.t0)
+        let done = s.completion(at: reopened)
+        XCTAssertEqual(done?.outcome, .landed)
+        XCTAssertEqual(done?.estimated, true)
+        XCTAssertEqual(done?.endedAt, eta)
+    }
+
+    func testOlderFixDoesNotReplaceANewerPositionOrEstimate() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        var s = session(fix: Fixtures.nearDestination(route, km: 14))
+        let next = Fixtures.t0.addingTimeInterval(90)
+        let latest = Fixtures.nearDestination(route, km: 8, at: next, alt: 2200)
+        s.apply(fix: latest, at: next)
+        let eta = s.estimatedLanding
+        let old = Fixtures.cruising(route, fraction: 0, alt: 0, gs: 0)
+        s.apply(fix: old, at: next.addingTimeInterval(300))
+        XCTAssertEqual(s.flight.state, latest)
+        XCTAssertEqual(s.lastFixAt, next)
+        XCTAssertEqual(s.estimatedLanding, eta)
+    }
+
+    func testFreshGoAroundCanExtendETAThenLandNormally() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        var s = session(fix: Fixtures.nearDestination(route, km: 14))
+        let initialETA = s.estimatedLanding
+        let goAround = Fixtures.t0.addingTimeInterval(60)
+        s.apply(fix: Fixtures.nearDestination(route, km: 40, at: goAround, alt: 8000, gs: 220, vs: 1200), at: goAround)
+        XCTAssertGreaterThan(s.estimatedLanding, initialETA)
+        XCTAssertGreaterThan(s.remainingSeconds(at: goAround), 8 * 60)
+        XCTAssertNil(s.completion(at: goAround))
+        let extendedETA = s.estimatedLanding
+        let final = goAround.addingTimeInterval(180)
+        s.apply(fix: Fixtures.nearDestination(route, km: 10, at: final, alt: 1800), at: final)
+        XCTAssertLessThan(s.estimatedLanding, extendedETA)
+        let landedAt = final.addingTimeInterval(200)
+        var landed = Fixtures.cruising(route, fraction: 1, at: landedAt, alt: 21, gs: 0)
+        landed.onGround = true
+        s.apply(fix: landed, at: landedAt)
+        let done = s.completion(at: landedAt)
+        XCTAssertEqual(done?.outcome, .landed)
+        XCTAssertEqual(done?.estimated, false)
+        XCTAssertEqual(done?.endedAt, landedAt)
+    }
+
+    func testFreshValidCruiseSlowdownCanExtendETA() {
+        var s = session(fraction: 0.4)
+        let eta = s.estimatedLanding
+        let next = Fixtures.t0.addingTimeInterval(60)
+        // It has advanced, but a real lower cruise speed changes the estimate.
+        s.apply(fix: Fixtures.cruising(s.route, fraction: 0.41, at: next, gs: 340), at: next)
+        XCTAssertGreaterThan(s.estimatedLanding.timeIntervalSince(eta), 10 * 60)
+        XCTAssertNil(s.completion(at: next))
     }
 
     func testSimulatedRefreshKeepsTheSchedule() {
@@ -256,7 +333,10 @@ final class MatchingTests: XCTestCase {
         XCTAssertEqual(ranked.count, 5)
 
         let strict = Matching.rank(flights: flights, targetMinutes: target, destination: nil, now: Fixtures.t0, strict: true)
-        XCTAssertTrue(strict.allSatisfy { abs($0.deltaMinutes) <= Matching.tolerance(forTarget: target) })
+        XCTAssertTrue(strict.allSatisfy {
+            guard let delta = $0.deltaMinutes else { return false }
+            return abs(delta) <= Matching.tolerance(forTarget: target)
+        })
         XCTAssertLessThan(strict.count, 5)
     }
 
@@ -291,6 +371,56 @@ final class MatchingTests: XCTestCase {
         var outbound = inbound
         outbound.trackDeg = Geo.bearing(inbound.point, Fixtures.lhr.point)
         XCTAssertNil(Matching.lookupPriority(state: outbound, targetMinutes: m, destination: Fixtures.jfk, now: Fixtures.t0))
+    }
+
+    func testUnlimitedMatchesIncludeShortFinalAndLongCruiseInStableOrder() {
+        let arrival = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        let longRoute = Fixtures.route(Fixtures.lhr, Fixtures.jfk, callsign: "BAW117", number: "BA117")
+        let one = LiveFlight(state: Fixtures.nearDestination(arrival, km: 1, alt: 600, gs: 150, hex: "one"), route: arrival)
+        let two = LiveFlight(state: Fixtures.nearDestination(arrival, km: 5, alt: 1600, gs: 150, hex: "two"), route: arrival)
+        let tied = LiveFlight(state: Fixtures.nearDestination(arrival, km: 5, alt: 1600, gs: 150, hex: "a-tied"), route: arrival)
+        let long = LiveFlight(state: Fixtures.cruising(longRoute, fraction: 0.2, hex: "long"), route: longRoute)
+        let ranked = Matching.rank(flights: [long, two, one], targetMinutes: nil, destination: nil, now: Fixtures.t0)
+        XCTAssertEqual(ranked.map { $0.flight.id }, ["one", "two", "long"])
+        XCTAssertEqual(ranked.prefix(2).map { $0.minutesToLanding }, [1, 2])
+        XCTAssertTrue(ranked.allSatisfy { $0.deltaMinutes == nil })
+        let reordered = Matching.rank(flights: [two, one, long], targetMinutes: nil, destination: nil, now: Fixtures.t0)
+        XCTAssertEqual(reordered.map { $0.flight.id }, ranked.map { $0.flight.id })
+        let timed = Matching.rank(flights: [one, two, long], targetMinutes: 120, destination: nil, now: Fixtures.t0, strict: false)
+        XCTAssertEqual(timed.map { $0.flight.id }, ["long"])
+        XCTAssertEqual(Matching.rank(flights: [two, tied], targetMinutes: nil, destination: nil, now: Fixtures.t0).map { $0.id }, ["a-tied", "two"])
+        XCTAssertEqual(Matching.rank(flights: [tied, two], targetMinutes: nil, destination: nil, now: Fixtures.t0).map { $0.id }, ["a-tied", "two"])
+    }
+
+    func testUnlimitedStillRejectsStaleGroundUnresolvedAndExpiredFlights() {
+        let route = Fixtures.route(Fixtures.pvg, Fixtures.hnd)
+        let live = LiveFlight(state: Fixtures.nearDestination(route, km: 5, alt: 1600, hex: "live"), route: route)
+        let stale = LiveFlight(state: Fixtures.cruising(route, fraction: 0.5, at: Fixtures.t0.addingTimeInterval(-900), hex: "stale"), route: route)
+        let ground = LiveFlight(state: Fixtures.cruising(route, fraction: 0, alt: 13, gs: 0, hex: "ground"), route: route)
+        let landed = LiveFlight(state: Fixtures.nearDestination(route, km: 2, alt: 100, gs: 95, hex: "landed"), route: route)
+        let unresolved = LiveFlight(state: Fixtures.cruising(route, fraction: 0.5, hex: "unresolved"), route: nil)
+        let expired = LiveFlight(state: Fixtures.nearDestination(route, km: 1, at: Fixtures.t0.addingTimeInterval(-120), alt: 600, gs: 150, hex: "expired"), route: route)
+        let wrongRoute = Fixtures.route(Fixtures.lhr, Fixtures.jfk, callsign: "BAW117", number: "BA117")
+        let other = LiveFlight(state: Fixtures.cruising(wrongRoute, fraction: 0.5, hex: "other"), route: wrongRoute)
+        let ranked = Matching.rank(flights: [ground, landed, stale, live, unresolved, expired, other], targetMinutes: nil, destination: Fixtures.hnd, now: Fixtures.t0)
+        XCTAssertEqual(ranked.map { $0.flight.id }, ["live"])
+    }
+
+    func testUnlimitedLookupRemovesDurationFiltersButKeepsDestinationDirection() {
+        let route = Fixtures.route(Fixtures.lhr, Fixtures.jfk, callsign: "BAW117", number: "BA117")
+        let arriving = Fixtures.nearDestination(route, km: 5, alt: 1600, gs: 150)
+        XCTAssertNil(Matching.lookupPriority(state: arriving, targetMinutes: 120, destination: nil, now: Fixtures.t0))
+        XCTAssertNotNil(Matching.lookupPriority(state: arriving, targetMinutes: nil, destination: nil, now: Fixtures.t0))
+        XCTAssertNotNil(Matching.lookupPriority(state: arriving, targetMinutes: nil, destination: Fixtures.jfk, now: Fixtures.t0))
+        let distant = Fixtures.cruising(route, fraction: 0.1)
+        XCTAssertNil(Matching.lookupPriority(state: distant, targetMinutes: 15, destination: Fixtures.jfk, now: Fixtures.t0))
+        XCTAssertNotNil(Matching.lookupPriority(state: distant, targetMinutes: nil, destination: Fixtures.jfk, now: Fixtures.t0))
+        var outbound = distant
+        outbound.trackDeg = Geo.bearing(outbound.point, Fixtures.lhr.point)
+        XCTAssertNil(Matching.lookupPriority(state: outbound, targetMinutes: nil, destination: Fixtures.jfk, now: Fixtures.t0))
+        var privateJet = distant
+        privateJet.callsign = "N123AB"
+        XCTAssertNil(Matching.lookupPriority(state: privateJet, targetMinutes: nil, destination: nil, now: Fixtures.t0))
     }
 }
 

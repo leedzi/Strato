@@ -170,6 +170,7 @@ struct FocusSession: Codable, Sendable, Identifiable {
     /// Applies a fresh position report.
     mutating func apply(fix: AircraftState, at now: Date) {
         let merged = fix.inheritingDetails(from: flight.state)
+        guard merged.positionTime >= lastFixAt else { return }
         let gap = merged.positionTime.timeIntervalSince(lastFixAt)
         let priorEstimate = estimatedLanding
         let priorFixAt = lastFixAt
@@ -189,9 +190,10 @@ struct FocusSession: Codable, Sendable, Identifiable {
                     touchdownEstimated = false
                 }
             }
-        } else {
+        } else if gap > 0 {
             let estimate = FlightMath.estimatedLanding(state: merged, route: route)
             // Never claim a landing in the past while the aircraft is still flying.
+            // A cached report must not keep pushing an overdue estimate to "now + 30 seconds".
             estimatedLanding = max(estimate, now.addingTimeInterval(30))
         }
         appendTrack(TrackPoint(

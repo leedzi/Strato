@@ -4,6 +4,7 @@ import SwiftUI
 
 /// "Find me a flight landing in N minutes", plus the custom-route option.
 struct FinderView: View {
+    var startInCustomMode = false
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var mode: Mode = .live
@@ -53,6 +54,7 @@ struct FinderView: View {
                     model.cancelFinder()
                     dismiss()
                 }
+                .accessibilityIdentifier("finder-close")
             }
         }
         .navigationDestination(item: $model.boarding) { flight in
@@ -60,7 +62,7 @@ struct FinderView: View {
         }
         .sheet(item: $picking) { target in
             NavigationStack {
-                AirportPicker(allowAny: target == .liveDestination) { airport in
+                AirportPicker(allowAny: target == .liveDestination, origin: target == .customDestination ? customOrigin : nil) { airport in
                     switch target {
                     case .liveDestination: model.finder.destination = airport
                     case .customOrigin: customOrigin = airport
@@ -70,12 +72,32 @@ struct FinderView: View {
             }
         }
         .onAppear {
-            if customOrigin == nil { customOrigin = model.reference.airport(code: "PVG") }
-            if customDestination == nil { customDestination = model.reference.airport(code: "HND") }
+            if startInCustomMode { mode = .custom }
+            consumeQuickTakeoff()
+            if customOrigin == nil { customOrigin = model.quickTakeoffRequest?.origin ?? model.homeAirport }
+            if customDestination == nil {
+                customDestination = model.quickTakeoffRequest?.destination
+                    ?? model.reference.airport(code: customOrigin?.code == "HND" ? "PVG" : "HND")
+            }
+        }
+        .onChange(of: model.quickTakeoffRequest?.id) { _, id in
+            if id != nil { consumeQuickTakeoff() }
+        }
+        .onChange(of: customOrigin?.id) { _, id in
+            if id == customDestination?.id { customDestination = nearbyDestinations.first }
         }
     }
 
     // MARK: Duration
+
+    private func consumeQuickTakeoff() {
+        guard startInCustomMode, let request = model.quickTakeoffRequest else { return }
+        mode = .custom
+        customOrigin = request.origin
+        customDestination = request.destination
+            ?? model.reference.airport(code: request.origin.code == "HND" ? "PVG" : "HND")
+        model.quickTakeoffRequest = nil
+    }
 
     private var durationCard: some View {
         @Bindable var model = model
@@ -83,25 +105,36 @@ struct FinderView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("专注时长").font(.headline)
                 Spacer()
-                Text(FlightMath.durationText(minutes: model.finder.targetMinutes))
+                Text(model.finder.isUnlimited ? (mode == .live ? "不限" : "全程") : FlightMath.durationText(minutes: model.finder.targetMinutes))
                     .font(.system(size: 22, weight: .bold, design: .rounded).monospacedDigit())
                     .foregroundStyle(Palette.sky)
                     .contentTransition(.numericText())
+                    .accessibilityIdentifier("finder-duration-label")
             }
-            Slider(
-                value: Binding(get: { Double(model.finder.targetMinutes) }, set: { model.finder.targetMinutes = Int($0) }),
-                in: 10...600, step: 5
-            )
-            .tint(Palette.sky)
-            .accessibilityIdentifier("duration-slider")
+            Toggle(mode == .live ? "不限时长，只找目的地" : "从出发机场飞完全程", isOn: $model.finder.isUnlimited)
+                .font(.subheadline)
+                .tint(Palette.sky)
+                .accessibilityIdentifier("finder-unlimited")
+            if !model.finder.isUnlimited {
+                Slider(
+                    value: Binding(get: { Double(model.finder.targetMinutes) }, set: { model.finder.targetMinutes = Int($0) }),
+                    in: 10...600, step: 5
+                )
+                .tint(Palette.sky)
+                .accessibilityIdentifier("duration-slider")
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(presets, id: \.self) { m in
                         Button {
-                            withAnimation(.snappy) { model.finder.targetMinutes = m }
+                            withAnimation(.snappy) {
+                                model.finder.isUnlimited = false
+                                model.finder.targetMinutes = m
+                            }
                         } label: {
-                            Chip(title: FlightMath.shortDuration(minutes: m), symbol: nil, selected: model.finder.targetMinutes == m)
+                            Chip(title: FlightMath.shortDuration(minutes: m), symbol: nil, selected: !model.finder.isUnlimited && model.finder.targetMinutes == m)
                         }
+                        .accessibilityIdentifier("finder-preset-\(m)")
                     }
                 }
             }
@@ -140,7 +173,9 @@ struct FinderView: View {
                         Text(searchingText)
                     } else {
                         Image(systemName: "dot.radiowaves.left.and.right")
-                        Text("搜索 \(FlightMath.durationText(minutes: model.finder.targetMinutes))后落地的航班")
+                        Text(model.finder.isUnlimited
+                             ? model.finder.destination.map { "搜索飞往\($0.city)的航班" } ?? "搜索正在飞行的航班"
+                             : "搜索 \(FlightMath.durationText(minutes: model.finder.targetMinutes))后落地的航班")
                     }
                 }
                 .font(.headline)
@@ -198,12 +233,29 @@ struct FinderView: View {
         return Int(SimFlight.fullMinutes(routeKm: Geo.distanceKm(o.point, d.point)).rounded())
     }
 
+    private var nearbyDestinations: [Airport] {
+        guard let origin = customOrigin else { return [] }
+        return Array(model.reference.majorAirports
+            .filter { $0.code != origin.code && Geo.distanceKm(origin.point, $0.point) > 60 }
+            .sorted { Geo.distanceKm(origin.point, $0.point) < Geo.distanceKm(origin.point, $1.point) }
+            .prefix(6))
+    }
+
+    private var customRequestedMinutes: Int {
+        if model.finder.isUnlimited, let origin = customOrigin, let destination = customDestination {
+            return Int(ceil(SimFlight.fullMinutes(routeKm: Geo.distanceKm(origin.point, destination.point))))
+        }
+        return model.finder.targetMinutes
+    }
+
     private var customSection: some View {
         VStack(spacing: 14) {
             VStack(spacing: 0) {
                 pickRow("出发", customOrigin) { picking = .customOrigin }
+                    .accessibilityIdentifier("custom-origin")
                 Divider().padding(.leading, 16)
                 pickRow("到达", customDestination) { picking = .customDestination }
+                    .accessibilityIdentifier("custom-destination")
                 Divider().padding(.leading, 16)
                 HStack {
                     Text("航司").font(.subheadline.weight(.semibold))
@@ -220,19 +272,54 @@ struct FinderView: View {
             }
             .glassCard(cornerRadius: 18)
 
+            if let origin = customOrigin, !nearbyDestinations.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("从\(origin.city)出发").font(.subheadline.weight(.semibold))
+                    Text("附近目的地 · 预计全程时间").font(.caption).foregroundStyle(.secondary)
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        ForEach(nearbyDestinations) { airport in
+                            Button {
+                                customDestination = airport
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Text(airport.city).lineLimit(1)
+                                    Spacer(minLength: 2)
+                                    Text(FlightMath.shortDuration(minutes: Int(SimFlight.fullMinutes(routeKm: Geo.distanceKm(origin.point, airport.point)).rounded())))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(Palette.sky)
+                                }
+                                .font(.caption.weight(.semibold))
+                                .padding(10)
+                                .background(.white.opacity(customDestination?.id == airport.id ? 0.16 : 0.06), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("nearby-\(airport.code)")
+                        }
+                    }
+                    Button("查看所有机场与预计时间") { picking = .customDestination }
+                        .font(.footnote.weight(.semibold))
+                        .accessibilityIdentifier("browse-route-times")
+                }
+                .padding(16)
+                .glassCard(cornerRadius: 18)
+            }
+
             if let full = customFullMinutes {
                 let minutes = min(model.finder.targetMinutes, full)
-                Text(minutes < model.finder.targetMinutes
+                Text(model.finder.isUnlimited
+                     ? "从\(customOrigin?.city ?? "出发机场")起飞，全程约 \(FlightMath.durationText(minutes: full))。"
+                     : minutes < model.finder.targetMinutes
                      ? "这条航线全程约 \(FlightMath.durationText(minutes: full))，会从起飞开始陪你飞完全程。"
                      : "全程约 \(FlightMath.durationText(minutes: full))。会从离落地还有 \(FlightMath.durationText(minutes: minutes))的位置登机。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("custom-route-estimate")
             }
 
             Button {
                 guard let o = customOrigin, let d = customDestination else { return }
-                let flight = model.makeSimulatedFlight(origin: o, destination: d, airlineICAO: customAirline, minutes: model.finder.targetMinutes)
+                let flight = model.makeSimulatedFlight(origin: o, destination: d, airlineICAO: customAirline, minutes: customRequestedMinutes)
                 model.prepareBoarding(flight)
             } label: {
                 Label("生成登机牌", systemImage: "ticket.fill")
@@ -292,9 +379,11 @@ struct MatchRow: View {
                         .font(.subheadline)
                         .lineLimit(1)
                     Spacer()
-                    Text(deltaText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let text = deltaText {
+                        Text(text)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             RouteProgressBar(boarded: nil, current: match.progress.fraction, tint: brand.accentColor)
@@ -304,8 +393,8 @@ struct MatchRow: View {
         .contentShape(RoundedRectangle(cornerRadius: 20))
     }
 
-    private var deltaText: String {
-        let d = match.deltaMinutes
+    private var deltaText: String? {
+        guard let d = match.deltaMinutes else { return nil }
         if d == 0 { return "刚好" }
         return d > 0 ? "多 \(d) 分钟" : "少 \(-d) 分钟"
     }
@@ -317,6 +406,7 @@ struct AirportPicker: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var allowAny: Bool
+    var origin: Airport? = nil
     var onPick: (Airport?) -> Void
     @State private var query = ""
 
@@ -330,7 +420,7 @@ struct AirportPicker: View {
                     Label("不限目的地", systemImage: "globe.asia.australia")
                 }
             }
-            ForEach(model.reference.searchAirports(query, limit: 60)) { airport in
+            ForEach(airports) { airport in
                 Button {
                     onPick(airport)
                     dismiss()
@@ -341,22 +431,39 @@ struct AirportPicker: View {
                             Text(airport.fullName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer()
-                        Text(airport.code)
-                            .font(.system(.body, design: .monospaced).weight(.bold))
-                            .foregroundStyle(Palette.sky)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(airport.code)
+                                .font(.system(.body, design: .monospaced).weight(.bold))
+                                .foregroundStyle(Palette.sky)
+                            if let origin {
+                                Text("约 \(FlightMath.shortDuration(minutes: Int(SimFlight.fullMinutes(routeKm: Geo.distanceKm(origin.point, airport.point)).rounded())))")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("airport-time-\(airport.code)")
+                            }
+                        }
                     }
                 }
                 .accessibilityIdentifier("airport-\(airport.code)")
             }
         }
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "城市、机场或三字码")
-        .navigationTitle("选择机场")
+        .navigationTitle(origin.map { "从\($0.code)出发" } ?? "选择机场")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("取消") { dismiss() }
             }
         }
+    }
+
+    private var airports: [Airport] {
+        if let origin, query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return Array(model.reference.majorAirports.filter { $0.id != origin.id }
+                .sorted { Geo.distanceKm(origin.point, $0.point) < Geo.distanceKm(origin.point, $1.point) }
+                .prefix(60))
+        }
+        return model.reference.searchAirports(query, limit: 60).filter { $0.id != origin?.id }
     }
 }
 

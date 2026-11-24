@@ -35,6 +35,24 @@ struct RootView: View {
             }
         }
         .animation(.smooth(duration: 0.45), value: model.session?.id)
+        .onOpenURL { url in
+            model.openWidgetURL(url)
+            if url.scheme == "strato" {
+                switch url.host {
+                case "logbook": tab = .logbook
+                case "stats": tab = .stats
+                default: tab = .radar
+                }
+            }
+        }
+        .onChange(of: model.quickTakeoffRequest?.id) { _, id in
+            if id != nil { tab = .radar }
+        }
+        .alert("数据未保存", isPresented: Binding(get: { model.dataError != nil }, set: { if !$0 { model.dataError = nil } })) {
+            Button("好") { model.dataError = nil }
+        } message: {
+            Text(model.dataError ?? "")
+        }
         .sheet(item: $model.arrival) { record in
             ArrivalSheet(record: record)
                 .presentationDetents([.large])

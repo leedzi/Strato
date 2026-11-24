@@ -27,6 +27,20 @@ struct StratoProvider: TimelineProvider {
             tierTitle: "金卡", week: [40, 95, 0, 120, 60, 130, 95], lastFlightNumber: "CA1831",
             lastRoute: "PEK → SHA", lastEndedAt: now.addingTimeInterval(-7200)
         )
+        let airport = WidgetSnapshot.Place(code: "HND", city: "东京羽田", lat: 35.5523, lon: 139.7798)
+        let origin = WidgetSnapshot.Place(code: "PVG", city: "上海浦东", lat: 31.1434, lon: 121.8052)
+        s.airport = airport
+        s.airportSince = now.addingTimeInterval(-7200)
+        s.destinations = [
+            WidgetSnapshot.Destination(place: .init(code: "NGO", city: "名古屋中部", lat: 34.8584, lon: 136.8054), minutes: 55),
+            WidgetSnapshot.Destination(place: .init(code: "KIX", city: "大阪关西", lat: 34.4273, lon: 135.2440), minutes: 65),
+            WidgetSnapshot.Destination(place: .init(code: "ITM", city: "大阪伊丹", lat: 34.7855, lon: 135.4382), minutes: 65)
+        ]
+        let path = Geo.arc(origin.point, airport.point, segments: 30)
+        s.lastJourney = WidgetSnapshot.Journey(flightNumber: "NH920", origin: origin, destination: airport,
+                                               endedAt: now.addingTimeInterval(-7200), focusMinutes: 95, distanceKm: 1730,
+                                               completed: true, landed: true, simulated: false, path: path)
+        s.routes = [path]
         return s
     }
 
@@ -45,6 +59,7 @@ struct StratoProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<StratoEntry>) -> Void) {
         let now = Date()
         var snapshot = SharedContainer.read()
+        if !Calendar.current.isDate(snapshot.updatedAt, inSameDayAs: now) { snapshot.stats.todayMinutes = 0 }
         let connected = SharedContainer.isAvailable
         var entries: [StratoEntry] = []
         if let flight = snapshot.flight, !flight.isPaused {
@@ -296,10 +311,10 @@ private struct WeekBars: View {
 struct StratoHomeWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "StratoHomeWidget", provider: StratoProvider()) { entry in
-            StratoWidgetView(entry: entry)
+            StratoLocationView(entry: entry)
         }
-        .configurationDisplayName("Strato")
-        .description("正在飞的专注航班，或者今天的专注时间。")
+        .configurationDisplayName("我的机场与快速起飞")
+        .description("从上次落地的机场继续，查看附近目的地和预计时间。")
         .supportedFamilies([.systemSmall, .systemMedium, .accessoryCircular, .accessoryRectangular, .accessoryInline])
     }
 }
@@ -339,9 +354,20 @@ struct StratoLiveActivity: Widget {
                         HStack {
                             Text(context.state.phaseTitle)
                             Spacer()
-                            Text(context.attributes.tagTitle)
+                            if context.state.signalLost == true {
+                                Text("信号中断 · 推算中")
+                            } else if let km = context.state.remainingKm {
+                                Text("还有 \(Int(max(0, km).rounded())) km")
+                            }
                         }
                         .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        HStack {
+                            Text("\(context.state.altitudeFt / 100) FL · \(context.state.groundSpeedKt) kt")
+                            Spacer()
+                            Text("\(context.attributes.tagTitle) · \(context.attributes.seat)")
+                        }
+                        .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                     }
                 }
@@ -353,7 +379,7 @@ struct StratoLiveActivity: Widget {
             } compactTrailing: {
                 timer(context.state)
                     .font(.caption.weight(.semibold))
-                    .frame(maxWidth: 52)
+                    .frame(maxWidth: 64)
             } minimal: {
                 Image(systemName: context.state.landed ? "checkmark.seal.fill" : "airplane").foregroundStyle(tint)
             }
@@ -364,7 +390,7 @@ struct StratoLiveActivity: Widget {
     @ViewBuilder
     private func timer(_ state: StratoFlightAttributes.ContentState) -> some View {
         if state.landed {
-            Text("已落地")
+            Text(state.completionTitle ?? "已落地")
         } else if state.isPaused {
             Text("已暂停")
         } else {
@@ -395,7 +421,7 @@ struct StratoLiveActivity: Widget {
                 Text(context.attributes.flightNumber).font(.subheadline.weight(.heavy)).foregroundStyle(tint)
                 Text(context.attributes.simulated ? "模拟航班" : context.state.phaseTitle).font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Label(context.attributes.tagTitle, systemImage: "airplane").font(.caption).foregroundStyle(.secondary)
+                Text("\(context.attributes.tagTitle) · \(context.attributes.seat)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             HStack(alignment: .lastTextBaseline) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -403,7 +429,11 @@ struct StratoLiveActivity: Widget {
                     Text(context.attributes.originCity).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer()
-                timer(context.state).font(.system(size: 26, weight: .bold, design: .rounded))
+                VStack(spacing: 1) {
+                    Text(context.state.followsLanding == false ? "专注剩余" : "距落地")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                    timer(context.state).font(.system(size: 26, weight: .bold, design: .rounded))
+                }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 0) {
                     Text(context.attributes.destinationCode).font(.system(size: 26, weight: .bold, design: .rounded))
@@ -411,9 +441,36 @@ struct StratoLiveActivity: Widget {
                 }
             }
             bar(context.state, tint: tint)
+            HStack(spacing: 10) {
+                Label("\(context.state.altitudeFt / 100) FL", systemImage: "arrow.up.right")
+                Text("\(context.state.groundSpeedKt) kt")
+                if let km = context.state.remainingKm { Text("余 \(Int(max(0, km).rounded())) km") }
+                Spacer(minLength: 0)
+                if context.state.signalLost == true {
+                    Label("推算中", systemImage: "antenna.radiowaves.left.and.right.slash")
+                        .foregroundStyle(Palette.amber)
+                } else {
+                    focusElapsed(context.state)
+                }
+            }
+            .font(.system(size: 10, weight: .medium).monospacedDigit())
+            .foregroundStyle(.secondary)
         }
         .foregroundStyle(.white)
         .padding(16)
+    }
+
+    @ViewBuilder
+    private func focusElapsed(_ state: StratoFlightAttributes.ContentState) -> some View {
+        if state.landed || state.focusPaused == true {
+            let minutes = Int(max(0, state.focusSeconds ?? 0) / 60)
+            Text("专注 \(minutes) 分" + (state.focusPaused == true ? " · 已暂停" : ""))
+        } else if let start = state.focusStartedAt {
+            HStack(spacing: 3) {
+                Text("已专注")
+                Text(start, style: .timer).monospacedDigit()
+            }
+        }
     }
 }
 
@@ -421,6 +478,9 @@ struct StratoLiveActivity: Widget {
 struct StratoWidgets: WidgetBundle {
     var body: some Widget {
         StratoHomeWidget()
+        StratoJourneyWidget()
+        StratoEarthWidget()
+        StratoFocusWidget()
         StratoLiveActivity()
     }
 }

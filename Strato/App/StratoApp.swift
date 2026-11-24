@@ -67,6 +67,12 @@ struct SettingsScreen: View {
                             Text(p.title).tag(p)
                         }
                     }
+                    NavigationLink {
+                        Google3DSettingsView()
+                    } label: {
+                        Label("Google 3D 外景", systemImage: "globe.asia.australia.fill")
+                    }
+                    .accessibilityIdentifier("google3d-settings")
                     Toggle("全球搜索用一次性快照", isOn: $model.settings.useGlobalSnapshot)
                 } header: {
                     Text("地图与数据")
@@ -78,13 +84,14 @@ struct SettingsScreen: View {
                     Picker("环境音", selection: Binding(get: { model.settings.ambient }, set: { model.setAmbient($0) })) {
                         ForEach(AmbientPreset.allCases) { Text($0.title).tag($0) }
                     }
-                    Toggle("机舱提示音", isOn: $model.settings.chimes)
+                    Toggle("登机、进近与落地提示音", isOn: $model.settings.chimes)
+                        .accessibilityIdentifier("settings-chimes-toggle")
                     Toggle("触感反馈", isOn: $model.settings.haptics)
                     Toggle("飞行中保持屏幕常亮", isOn: $model.settings.keepAwake)
                 } header: {
                     Text("飞行中")
                 } footer: {
-                    Text("环境音在登机后播放，会和你正在听的音乐混在一起。")
+                    Text("环境音在登机后播放，会和你正在听的音乐混在一起。提示音开关同时控制登机、下降、进近和落地通知的声音。")
                 }
 
                 Section {
@@ -104,6 +111,12 @@ struct SettingsScreen: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        ICloudSyncView()
+                    } label: {
+                        Label("iCloud Drive 同步", systemImage: "icloud")
+                    }
+                    .accessibilityIdentifier("icloud-settings")
                     if let exportURL {
                         ShareLink(item: exportURL) {
                             Label("导出飞行记录（JSON）", systemImage: "square.and.arrow.up")
@@ -118,7 +131,7 @@ struct SettingsScreen: View {
                 } header: {
                     Text("数据")
                 } footer: {
-                    Text("所有记录只保存在这台设备上。")
+                    Text(model.cloudSync.isConnected ? "记录保存在本机，并与选定文件夹自动合并。删除记录会同步；可先导出备份。" : "记录保存在本机。可选择 iCloud Drive 文件夹，在其他设备自动同步。")
                 }
 
                 Section {
@@ -143,7 +156,7 @@ struct SettingsScreen: View {
                     exportURL = nil
                 }
             } message: {
-                Text("登机牌、专注时间和里程都会删除，无法恢复。可以先导出一份。")
+                Text(model.cloudSync.isConnected ? "登机牌、专注时间和里程都会删除，并同步到已连接的设备。可以先导出一份。" : "登机牌、专注时间和里程都会删除。可以先导出一份。")
             }
             .task(id: model.records.count) {
                 exportURL = model.records.isEmpty ? nil : model.exportLogbook()

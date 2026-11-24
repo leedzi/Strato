@@ -22,6 +22,8 @@ struct FinderState {
 
     var phase: Phase = .idle
     var targetMinutes = 60
+    var isUnlimited = false
+    var matchingMinutes: Int? { isUnlimited ? nil : targetMinutes }
     var destination: Airport?
     var results: [FlightMatch] = []
     /// True when nothing landed inside the tolerance and the closest alternatives are shown instead.
@@ -36,6 +38,12 @@ struct FinderState {
         default: return false
         }
     }
+}
+
+struct QuickTakeoffRequest: Identifiable {
+    var id = UUID()
+    var origin: Airport
+    var destination: Airport?
 }
 
 @MainActor
@@ -54,6 +62,7 @@ final class AppModel {
     @ObservationIgnored let routes: RouteResolver
     @ObservationIgnored let photos: PhotoService
     @ObservationIgnored let activity = LiveActivityController()
+    let cloudSync: ICloudDriveSync
     @ObservationIgnored private var locator: Locator?
 
     // MARK: State
@@ -63,6 +72,11 @@ final class AppModel {
             guard settings != oldValue else { return }
             Storage.save(settings, to: Storage.File.settings)
             Haptics.enabled = settings.haptics
+            if settings.notifications != oldValue.notifications || settings.chimes != oldValue.chimes {
+                lastNotifiedEnd = nil
+                if !settings.notifications { Notifier.cancelLanding() }
+                syncNotification()
+            }
         }
     }
 
@@ -81,6 +95,7 @@ final class AppModel {
     // Finding and boarding
     var finder = FinderState()
     var boarding: LiveFlight?
+    var quickTakeoffRequest: QuickTakeoffRequest?
     var lookupNote: String?
     var isLookingUp = false
 
@@ -92,6 +107,7 @@ final class AppModel {
     // Logbook
     var records: [FocusRecord] = []
     var stats = FocusStats()
+    var dataError: String?
 
     // MARK: Private
 
@@ -108,6 +124,14 @@ final class AppModel {
     @ObservationIgnored private var lastPublishedEnd: Date?
     @ObservationIgnored private var lastPublishedPhase: FlightPhase?
     @ObservationIgnored private var isActive = true
+    @ObservationIgnored private var cloudTask: Task<Void, Never>?
+    @ObservationIgnored private var cloudTaskID: UUID?
+    @ObservationIgnored private var cloudLoop: Task<Void, Never>?
+    @ObservationIgnored private var cloudNeedsSync = false
+    @ObservationIgnored private var cloudRevision = 0
+    @ObservationIgnored private var lastPublishedAt = Date.distantPast
+    @ObservationIgnored private var lastSnapshotAt = Date.distantPast
+    @ObservationIgnored private var lastSignalLost = false
 
     // MARK: Init
 
@@ -137,6 +161,7 @@ final class AppModel {
             self.photos = PhotoService(http: fetcher)
         }
 
+        self.cloudSync = ICloudDriveSync()
         var loaded = Storage.load(AppSettings.self, from: Storage.File.settings) ?? AppSettings()
         // `-startLat` / `-startLon` open the radar somewhere specific (used by the live smoke test).
         let defaults = UserDefaults.standard
@@ -159,6 +184,19 @@ final class AppModel {
         } else {
             records = Storage.load([FocusRecord].self, from: Storage.File.logbook) ?? []
         }
+        records.sort { $0.endedAt > $1.endedAt }
+        finder.targetMinutes = loaded.finderMinutes
+        finder.isUnlimited = loaded.finderUnlimited
+        if let landed = records.first(where: { $0.outcome == .landed }),
+           loaded.lastAirportCode == nil || landed.endedAt > (loaded.lastAirportAt ?? .distantPast) {
+            settings.lastAirportCode = landed.destination.code
+            settings.lastAirportAt = landed.endedAt
+        }
+        if defaults.object(forKey: "startLat") == nil,
+           let code = settings.lastAirportCode, let airport = reference.airport(code: code) {
+            radarCenter = airport.point
+            radarRadiusKm = 260
+        }
         refreshStats()
 
         if let saved = Storage.load(FocusSession.self, from: Storage.File.session) {
@@ -170,12 +208,60 @@ final class AppModel {
         Task { [routes] in
             if let data = Storage.data(Storage.File.routes) { await routes.importCache(data) }
         }
+        cloudSync.onRemoteChange = { [weak self] in self?.scheduleCloudSync(delay: 0.5) }
+        if !isDemo { startCloudLoop() }
         publishSnapshot()
     }
 
     // MARK: Small helpers
 
     var now: Date { clock() }
+
+    /// A completed landing determines where the next journey begins.
+    var homeAirport: Airport? {
+        if let code = settings.lastAirportCode, let airport = reference.airport(code: code) { return airport }
+        if let landed = records.first(where: { $0.outcome == .landed }) { return landed.destination }
+        return reference.nearestAirport(to: radarCenter, maxKm: 800)?.airport ?? reference.airport(code: "PVG")
+    }
+
+    func requestQuickTakeoff(origin: Airport? = nil, destination: Airport? = nil) {
+        guard session == nil, let airport = origin ?? homeAirport else { return }
+        boarding = nil
+        finder.targetMinutes = settings.finderMinutes
+        finder.isUnlimited = settings.finderUnlimited
+        quickTakeoffRequest = QuickTakeoffRequest(origin: airport, destination: destination)
+    }
+
+    func openWidgetURL(_ url: URL) {
+        guard url.scheme == "strato" else { return }
+        switch url.host {
+        case "takeoff":
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let origin = items.first(where: { $0.name == "origin" }).flatMap { $0.value }.flatMap { reference.airport(code: $0) }
+            let destination = items.first(where: { $0.name == "destination" }).flatMap { $0.value }.flatMap { reference.airport(code: $0) }
+            requestQuickTakeoff(origin: origin, destination: destination)
+        case "airport":
+            guard session == nil, let airport = homeAirport else { return }
+            clearFocus()
+            radarCenter = airport.point
+            command(.center(airport.point, distanceMeters: 520_000))
+            refreshRadar()
+        default: break
+        }
+    }
+
+    private func rememberLanding(_ record: FocusRecord) {
+        guard record.outcome == .landed,
+              record.endedAt >= (settings.lastAirportAt ?? .distantPast) else { return }
+        settings.lastAirportCode = record.destination.code
+        settings.lastAirportAt = record.endedAt
+        settings.lastLat = record.destination.lat
+        settings.lastLon = record.destination.lon
+        settings.lastRadiusKm = 260
+        radarCenter = record.destination.point
+        radarRadiusKm = 260
+        command(.center(record.destination.point, distanceMeters: 520_000))
+    }
 
     private func command(_ kind: MapCommand.Kind) {
         commandCounter += 1
@@ -205,9 +291,21 @@ final class AppModel {
         stats = FocusStats(records: records, now: clock(), calendar: .current, reference: reference)
     }
 
-    private func saveRecords() {
-        guard !isDemo else { return }
-        Storage.save(records, to: Storage.File.logbook)
+    /// Persist the completed batch before removing the recoverable active session.
+    private func saveRecords(_ updated: [FocusRecord]) -> Bool {
+        let ordered = updated.sorted {
+            if $0.endedAt != $1.endedAt { return $0.endedAt > $1.endedAt }
+            if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
+            return $0.id.uuidString < $1.id.uuidString
+        }
+        guard isDemo || Storage.save(ordered, to: Storage.File.logbook) else {
+            dataError = "飞行记录暂时无法写入本机，请检查可用空间后重试。当前航程已保留。"
+            return false
+        }
+        records = ordered
+        cloudRevision += 1
+        scheduleCloudSync()
+        return true
     }
 
     private func saveRouteCacheIfNeeded() {
@@ -223,6 +321,9 @@ final class AppModel {
     func sceneBecameActive() {
         isActive = true
         refreshStats()
+        publishSnapshot()
+        startCloudLoop()
+        scheduleCloudSync(delay: 0)
         if session != nil {
             Task { await pollAircraft(force: true) }
         } else if radarVisible {
@@ -232,6 +333,8 @@ final class AppModel {
 
     func sceneResignedActive() {
         isActive = false
+        cloudLoop?.cancel()
+        cloudLoop = nil
         radarLoop?.cancel()
         radarLoop = nil
         if let session { Storage.save(session, to: Storage.File.session) }
@@ -452,6 +555,7 @@ final class AppModel {
     func findFlights() {
         finderTask?.cancel()
         settings.finderMinutes = finder.targetMinutes
+        settings.finderUnlimited = finder.isUnlimited
         finderTask = Task { [weak self] in await self?.runFinder() }
     }
 
@@ -461,7 +565,7 @@ final class AppModel {
     }
 
     private func runFinder() async {
-        let target = finder.targetMinutes
+        let target = finder.matchingMinutes
         let destination = finder.destination
         finder.phase = .snapshot
         finder.results = []
@@ -557,25 +661,20 @@ final class AppModel {
     }
 
     /// The global snapshot is coarse and lacks aircraft details; fetch precise data for the best matches.
-    private func refreshTopResults(target: Int, destination: Airport?, maxAge: TimeInterval) async {
+    private func refreshTopResults(target: Int?, destination: Airport?, maxAge: TimeInterval) async {
         let top = finder.results.prefix(6).map { $0.flight }
         guard top.contains(where: { $0.state.source == .opensky }) else { return }
+        var flights = finder.results.map { $0.flight }
         for flight in top {
             if Task.isCancelled { return }
             guard case .ok(let fresh) = await adsb.aircraft(hex: flight.id), fresh.callsign == flight.callsign,
                   let route = flight.route else { continue }
-            guard let i = finder.results.firstIndex(where: { $0.id == flight.id }) else { continue }
+            guard let i = flights.firstIndex(where: { $0.id == flight.id }) else { continue }
             let updated = LiveFlight(state: fresh, route: route)
-            let landing = FlightMath.estimatedLanding(state: fresh, route: route)
-            let minutes = Int((landing.timeIntervalSince(clock()) / 60).rounded())
-            finder.results[i] = FlightMatch(
-                flight: updated,
-                minutesToLanding: minutes,
-                progress: FlightMath.progress(at: fresh.point, route: route),
-                deltaMinutes: minutes - target
-            )
+            flights[i] = updated
         }
-        finder.results.sort { abs($0.deltaMinutes) < abs($1.deltaMinutes) }
+        finder.results = Array(Matching.rank(flights: flights, targetMinutes: target, destination: destination,
+                                             now: clock(), strict: !finder.relaxed, maxAge: maxAge).prefix(30))
     }
 
     // MARK: Boarding
@@ -649,6 +748,7 @@ final class AppModel {
         )
         lastPublishedEnd = s.plannedEnd(at: start)
         lastPublishedPhase = s.phase
+        lastPublishedAt = start
         syncNotification()
         publishSnapshot()
         startSessionLoop()
@@ -731,11 +831,17 @@ final class AppModel {
         let end = s.plannedEnd(at: now)
         let phase = s.phase
         let shifted = lastPublishedEnd.map { abs($0.timeIntervalSince(end)) > 20 } ?? true
-        if shifted || phase != lastPublishedPhase {
+        let phaseChanged = phase != lastPublishedPhase
+        let signalChanged = s.signalLost != lastSignalLost
+        if shifted || phaseChanged || signalChanged || now.timeIntervalSince(lastPublishedAt) >= 30 {
             lastPublishedEnd = end
             lastPublishedPhase = phase
+            lastPublishedAt = now
+            lastSignalLost = s.signalLost
             activity.update(activityState(for: s, at: now))
-            publishSnapshot()
+            if shifted || phaseChanged || signalChanged || now.timeIntervalSince(lastSnapshotAt) >= 60 {
+                publishSnapshot()
+            }
         }
         syncNotification()
     }
@@ -775,11 +881,11 @@ final class AppModel {
     private func finish(_ completion: FocusSession.Completion) {
         guard let s = session else { return }
         let record = s.record(completion)
-        let now = clock()
-        cleanUpSession(landedState: completion.outcome == .endedEarly ? nil : activityState(for: s, at: now, landed: true))
+        let updated = [record] + records.filter { $0.id != record.id }
+        guard saveRecords(updated) else { return }
+        cleanUpSession(landedState: completion.outcome == .endedEarly ? nil : activityState(for: s, at: completion.endedAt, landed: true))
         session = nil
-        records.insert(record, at: 0)
-        saveRecords()
+        rememberLanding(record)
         refreshStats()
         publishSnapshot()
         if isActive {
@@ -801,7 +907,6 @@ final class AppModel {
         lastPublishedEnd = nil
         lastPublishedPhase = nil
         announcement = nil
-        // The radar reopens where the user left it, not on the flight that just ended.
         mapCommand = nil
     }
 
@@ -833,9 +938,9 @@ final class AppModel {
         lastNotifiedEnd = end
         let number = s.flight.displayNumber
         if s.timerMinutes != nil {
-            Notifier.scheduleLanding(at: end, title: "专注时间到", body: "\(number) 还在飞往\(s.route.destination.city)，你的这一段已经完成。")
+            Notifier.scheduleLanding(at: end, title: "专注时间到", body: "\(number) 还在飞往\(s.route.destination.city)，你的这一段已经完成。", sound: settings.chimes)
         } else {
-            Notifier.scheduleLanding(at: end, title: "\(number) 预计已落地\(s.route.destination.city)", body: "这趟专注航程结束了，回来给登机牌盖章。")
+            Notifier.scheduleLanding(at: end, title: "\(number) 预计已落地\(s.route.destination.city)", body: "这趟专注航程结束了，回来给登机牌盖章。", sound: settings.chimes)
         }
     }
 
@@ -853,15 +958,54 @@ final class AppModel {
             // Only a fixed timer stops when paused; a landing countdown keeps running.
             isPaused: s.isPaused && s.timerMinutes != nil,
             pausedRemaining: s.isPaused && s.timerMinutes != nil ? s.remainingSeconds(at: now) : nil,
-            phaseTitle: landed ? "已落地" : s.phase.title,
+            phaseTitle: landed ? (s.followsLanding ? "已落地" : "专注完成") : s.phase.title,
             altitudeFt: s.flight.state.altitudeFt ?? 0,
             groundSpeedKt: Int(s.flight.state.groundSpeedKt ?? 0),
-            landed: landed
+            landed: landed,
+            remainingKm: s.progress(at: now).remainingKm,
+            focusStartedAt: now.addingTimeInterval(-s.focusSeconds(at: now)),
+            focusSeconds: s.focusSeconds(at: now),
+            focusPaused: s.isPaused,
+            signalLost: s.signalLost,
+            followsLanding: s.followsLanding,
+            completionTitle: landed ? (s.followsLanding ? "已落地" : "专注完成") : nil
         )
     }
 
     func publishSnapshot() {
         var snapshot = WidgetSnapshot()
+        func place(_ airport: Airport) -> WidgetSnapshot.Place {
+            WidgetSnapshot.Place(code: airport.code, city: airport.city, lat: airport.lat, lon: airport.lon)
+        }
+        if let airport = homeAirport {
+            snapshot.airport = place(airport)
+            snapshot.airportSince = settings.lastAirportAt
+            snapshot.destinations = reference.majorAirports
+                .filter { $0.code != airport.code && Geo.distanceKm(airport.point, $0.point) > 60 }
+                .sorted { Geo.distanceKm(airport.point, $0.point) < Geo.distanceKm(airport.point, $1.point) }
+                .prefix(4)
+                .map {
+                    WidgetSnapshot.Destination(place: place($0), minutes: Int(SimFlight.fullMinutes(routeKm: Geo.distanceKm(airport.point, $0.point)).rounded()))
+                }
+        }
+        if let last = records.first {
+            snapshot.lastJourney = WidgetSnapshot.Journey(
+                flightNumber: last.flightNumber, origin: place(last.origin), destination: place(last.destination),
+                endedAt: last.endedAt, focusMinutes: last.focusMinutes, distanceKm: last.distanceKm,
+                completed: last.completed, landed: last.outcome == .landed, simulated: last.simulated,
+                path: last.path.count > 1 ? last.path : Geo.arc(
+                    Geo.interpolate(last.origin.point, last.destination.point, last.boardedFraction),
+                    Geo.interpolate(last.origin.point, last.destination.point, last.endFraction), segments: 30)
+            )
+        }
+        snapshot.routes = records.prefix(40).map { record in
+            let path = record.path.count > 1 ? record.path : Geo.arc(
+                Geo.interpolate(record.origin.point, record.destination.point, record.boardedFraction),
+                Geo.interpolate(record.origin.point, record.destination.point, record.endFraction), segments: 30)
+            // Keep the shared file compact even after a long journey.
+            guard path.count > 48 else { return path }
+            return stride(from: 0, to: path.count, by: max(1, path.count / 40)).map { path[$0] } + [path[path.count - 1]]
+        }
         snapshot.stats = WidgetSnapshot.Stats(
             todayMinutes: stats.todayMinutes,
             weekMinutes: stats.weekMinutes,
@@ -900,20 +1044,138 @@ final class AppModel {
         }
         snapshot.updatedAt = Date()
         SharedContainer.write(snapshot)
+        lastSnapshotAt = clock()
     }
 
     // MARK: Logbook
 
     func delete(_ record: FocusRecord) {
-        records.removeAll { $0.id == record.id }
-        saveRecords()
-        refreshStats()
-        publishSnapshot()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                if !isDemo { try await cloudSync.markDeleted([record.id]).value }
+                let remaining = records.filter { $0.id != record.id }
+                guard isDemo || Storage.save(remaining, to: Storage.File.logbook) else {
+                    dataError = "没有足够空间保存更改，请释放空间后重试。"
+                    return
+                }
+                records = remaining
+                cloudRevision += 1
+                refreshStats()
+                publishSnapshot()
+                scheduleCloudSync()
+            } catch {
+                dataError = error.localizedDescription
+            }
+        }
     }
 
     func eraseAllRecords() {
-        records = []
-        saveRecords()
+        let ids = records.map { $0.id }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                if !isDemo { try await cloudSync.markDeleted(ids).value }
+                let removed = Set(ids)
+                let remaining = records.filter { !removed.contains($0.id) }
+                guard isDemo || Storage.save(remaining, to: Storage.File.logbook) else {
+                    dataError = "没有足够空间保存更改，请释放空间后重试。"
+                    return
+                }
+                records = remaining
+                cloudRevision += 1
+                refreshStats()
+                publishSnapshot()
+                scheduleCloudSync()
+            } catch {
+                dataError = error.localizedDescription
+            }
+        }
+    }
+
+    // MARK: iCloud Drive logbook
+
+    func connectICloudFolder(_ url: URL) {
+        guard !isDemo else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let revision = cloudRevision
+            do {
+                let merged = try await cloudSync.connect(to: url, records: records)
+                if revision == cloudRevision { applyCloudRecords(merged) }
+                else { scheduleCloudSync(delay: 0) }
+                startCloudLoop()
+            } catch {
+                dataError = error.localizedDescription
+            }
+        }
+    }
+
+    func syncICloudNow() { scheduleCloudSync(delay: 0) }
+
+    func disconnectICloud() {
+        cloudTask?.cancel()
+        cloudTask = nil
+        cloudTaskID = nil
+        cloudNeedsSync = false
+        cloudSync.disconnect()
+    }
+
+    private func startCloudLoop() {
+        guard !isDemo, isActive else { return }
+        cloudLoop?.cancel()
+        cloudLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                if cloudSync.isConnected { scheduleCloudSync(delay: 0) }
+            }
+        }
+    }
+
+    /// Coalesces writes and merges again if a local change happens during an external read.
+    private func scheduleCloudSync(delay: TimeInterval = 0.7) {
+        guard !isDemo, cloudSync.isConnected else { return }
+        cloudNeedsSync = true
+        guard cloudTask == nil else { return }
+        let job = UUID()
+        cloudTaskID = job
+        cloudTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if cloudTaskID == job {
+                    cloudTask = nil
+                    cloudTaskID = nil
+                }
+            }
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            while cloudNeedsSync && !Task.isCancelled && cloudSync.isConnected {
+                cloudNeedsSync = false
+                let revision = cloudRevision
+                do {
+                    let merged = try await cloudSync.sync(records: records)
+                    guard !Task.isCancelled else { return }
+                    if revision == cloudRevision { applyCloudRecords(merged) }
+                    else { cloudNeedsSync = true }
+                } catch {
+                    // The service keeps local records and exposes the reason for the next retry.
+                    break
+                }
+            }
+        }
+    }
+
+    private func applyCloudRecords(_ merged: [FocusRecord]) {
+        guard merged != records else { return }
+        guard Storage.save(merged, to: Storage.File.logbook) else {
+            cloudSync.reportLocalSaveFailure()
+            dataError = "合并后的记录暂时无法保存，本机和同步文件已保留。请检查可用空间。"
+            return
+        }
+        records = merged
+        if let latest = records.first(where: { $0.outcome == .landed }), latest.endedAt > (settings.lastAirportAt ?? .distantPast) {
+            rememberLanding(latest)
+        }
         refreshStats()
         publishSnapshot()
     }
